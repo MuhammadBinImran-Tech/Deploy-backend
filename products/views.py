@@ -1753,7 +1753,15 @@ class AnnotationBatchViewSet(BatchCreationMixin, viewsets.ModelViewSet):
             except HumanAnnotator.DoesNotExist:
                 return AnnotationBatch.objects.none()
         
-        return queryset.order_by('-created_at')
+        order_by = self.request.query_params.get('order_by', 'created_at')
+        order_dir = self.request.query_params.get('order_dir', 'desc')
+        allowed_order_by = {'created_at', 'name'}
+        if order_by not in allowed_order_by:
+            order_by = 'created_at'
+        if order_dir not in {'asc', 'desc'}:
+            order_dir = 'desc'
+        ordering = order_by if order_dir == 'asc' else f'-{order_by}'
+        return queryset.order_by(ordering)
     
     def retrieve(self, request, *args, **kwargs):
         batch = self.get_object()
