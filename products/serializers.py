@@ -514,27 +514,14 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
         read_only_fields = fields
     
     def get_display_name(self, obj):
-        """Return batch name with timestamp if not already included"""
-        if obj.name:
-            # Check if name already has a timestamp pattern
-            import re
-            # Common timestamp patterns in the name
-            timestamp_patterns = [
-                r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}',  # YYYY-MM-DD HH:MM
-                r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',  # YYYY-MM-DD HH:MM:SS
-                r'\d{4}/\d{2}/\d{2}',  # YYYY/MM/DD
-                r'\d{2}-\d{2}-\d{4}',  # DD-MM-YYYY
-            ]
-            
-            has_timestamp = any(re.search(pattern, obj.name) for pattern in timestamp_patterns)
-            
-            if not has_timestamp and obj.created_at:
-                # Add timestamp if not present
-                from django.utils import timezone
-                timestamp = obj.created_at.strftime('%Y-%m-%d %H:%M')
-                return f"{obj.name} ({timestamp})"
-        
-        return obj.name or f"{obj.batch_type.upper()} Batch"
+        """Return a global counter display name per batch type."""
+        if not obj.batch_type:
+            return obj.name or "Batch"
+        batch_number = AnnotationBatch.objects.filter(
+            batch_type=obj.batch_type,
+            id__lte=obj.id
+        ).count()
+        return f"{obj.batch_type.upper()} Batch #{batch_number}"
 
     def get_items_count(self, obj):
         return obj.batchitem_set.count()
@@ -970,7 +957,7 @@ class AIProcessingControlSerializer(serializers.ModelSerializer):
 # Request/Response Serializers
 class CreateBatchRequestSerializer(serializers.Serializer):
     batch_type = serializers.ChoiceField(choices=['ai', 'human'])
-    batch_size = serializers.IntegerField(min_value=1, max_value=100, default=10)
+    batch_size = serializers.IntegerField(min_value=1, default=10)
     name = serializers.CharField(required=False, allow_blank=True)
     
     # For AI batches
@@ -991,8 +978,8 @@ class CreateBatchRequestSerializer(serializers.Serializer):
 
 class CreateMultiBatchRequestSerializer(serializers.Serializer):
     batch_type = serializers.ChoiceField(choices=['ai', 'human'])
-    total_batches = serializers.IntegerField(min_value=1, max_value=100, default=1)
-    items_per_batch = serializers.IntegerField(min_value=1, max_value=100, default=10)
+    total_batches = serializers.IntegerField(min_value=1, default=1)
+    items_per_batch = serializers.IntegerField(min_value=1, default=10)
     
     # For AI batches
     ai_provider_ids = serializers.ListField(
@@ -1022,7 +1009,7 @@ class CreateMultiBatchRequestSerializer(serializers.Serializer):
 
 
 class CreateAIBatchRequestSerializer(serializers.Serializer):
-    batch_size = serializers.IntegerField(min_value=1, max_value=100, default=10)
+    batch_size = serializers.IntegerField(min_value=1, default=10)
     ai_provider_ids = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
@@ -1032,7 +1019,7 @@ class CreateAIBatchRequestSerializer(serializers.Serializer):
 
 
 class CreateHumanBatchRequestSerializer(serializers.Serializer):
-    batch_size = serializers.IntegerField(min_value=1, max_value=100, default=10)
+    batch_size = serializers.IntegerField(min_value=1, default=10)
     annotator_ids = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
@@ -1072,7 +1059,7 @@ class BatchProgressUpdateSerializer(serializers.Serializer):
 
 
 class StartAutoAIProcessingSerializer(serializers.Serializer):
-    batch_size = serializers.IntegerField(default=10, min_value=1, max_value=100)
+    batch_size = serializers.IntegerField(default=10, min_value=1)
     ai_provider_ids = serializers.ListField(
         child=serializers.IntegerField(),
         required=False
@@ -1080,7 +1067,7 @@ class StartAutoAIProcessingSerializer(serializers.Serializer):
 
 
 class AutoAssignHumanBatchSerializer(serializers.Serializer):
-    batch_size = serializers.IntegerField(default=10, min_value=1, max_value=100)
+    batch_size = serializers.IntegerField(default=10, min_value=1)
     overlap_count = serializers.IntegerField(default=1, min_value=1, max_value=10)
     force_create = serializers.BooleanField(default=False)
     name = serializers.CharField(required=False, allow_blank=True)
