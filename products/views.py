@@ -10,6 +10,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.core.paginator import Paginator
 import logging
+from collections import defaultdict
 import random
 import threading
 import time
@@ -2127,6 +2128,68 @@ class AnnotationBatchViewSet(BatchCreationMixin, viewsets.ModelViewSet):
             'completed_items': completed_items,
             'total_items': total_items
         })
+
+    @action(detail=True, methods=['get'])
+    def items(self, request, pk=None):
+        """List batch items with per-item progress."""
+        batch = self.get_object()
+        batch_items = BatchItem.objects.filter(batch=batch).select_related('product').order_by('id')
+
+        assignment_items = BatchAssignmentItem.objects.filter(
+            batch_item__in=batch_items
+        ).values('batch_item_id', 'status')
+
+        stats = defaultdict(lambda: {
+            'total': 0,
+            'completed': 0,
+            'failed': 0,
+            'in_progress': 0,
+        })
+
+        for item in assignment_items:
+            item_stats = stats[item['batch_item_id']]
+            item_stats['total'] += 1
+            status_value = item['status']
+            if status_value in ['ai_done', 'human_done']:
+                item_stats['completed'] += 1
+            elif status_value == 'ai_failed':
+                item_stats['failed'] += 1
+            elif status_value in ['ai_in_progress', 'human_in_progress']:
+                item_stats['in_progress'] += 1
+
+        response_items = []
+        for batch_item in batch_items:
+            item_stats = stats.get(batch_item.id, {'total': 0, 'completed': 0, 'failed': 0, 'in_progress': 0})
+            total = item_stats['total']
+            finished = item_stats['completed'] + item_stats['failed']
+            progress = round((finished / total) * 100, 2) if total > 0 else 0
+
+            if item_stats['failed'] > 0:
+                status_label = 'failed'
+            elif total > 0 and finished == total:
+                status_label = 'completed'
+            elif item_stats['in_progress'] > 0:
+                status_label = 'in_progress'
+            else:
+                status_label = 'pending'
+
+            product = batch_item.product
+            response_items.append({
+                'id': batch_item.id,
+                'product_id': product.id,
+                'product_name': product.style_desc or product.style_id or f'Product {product.id}',
+                'status': status_label,
+                'progress': progress,
+                'created_at': batch_item.created_at,
+            })
+
+        page = self.paginate_queryset(response_items)
+        if page is not None:
+            serializer = BatchItemProgressSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = BatchItemProgressSerializer(response_items, many=True)
+        return Response(serializer.data)
     
     @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
     def start_processing(self, request, pk=None):
