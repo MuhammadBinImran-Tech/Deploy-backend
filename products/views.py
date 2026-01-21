@@ -2161,12 +2161,13 @@ class AnnotationBatchViewSet(BatchCreationMixin, viewsets.ModelViewSet):
         for batch_item in batch_items:
             item_stats = stats.get(batch_item.id, {'total': 0, 'completed': 0, 'failed': 0, 'in_progress': 0})
             total = item_stats['total']
-            finished = item_stats['completed'] + item_stats['failed']
-            progress = round((finished / total) * 100, 2) if total > 0 else 0
+            completed = item_stats['completed']
+            failed = item_stats['failed']
+            progress = round((completed / total) * 100, 2) if total > 0 else 0
 
-            if item_stats['failed'] > 0:
+            if failed > 0:
                 status_label = 'failed'
-            elif total > 0 and finished == total:
+            elif total > 0 and completed == total:
                 status_label = 'completed'
             elif item_stats['in_progress'] > 0:
                 status_label = 'in_progress'
