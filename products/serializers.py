@@ -613,6 +613,15 @@ class BatchItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class BatchItemProgressSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    product_id = serializers.IntegerField()
+    product_name = serializers.CharField()
+    status = serializers.CharField()
+    progress = serializers.FloatField()
+    created_at = serializers.DateTimeField()
+
+
 class BatchAssignmentSerializer(serializers.ModelSerializer):
     assignee_name = serializers.CharField(read_only=True)
     batch_name = serializers.CharField(source='batch.name', read_only=True)
