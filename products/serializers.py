@@ -346,6 +346,18 @@ class AIProviderSerializer(serializers.ModelSerializer):
     prompt_template = serializers.CharField(
         write_only=True, required=False, allow_blank=True, allow_null=True
     )
+    max_threads = serializers.IntegerField(
+        write_only=True, required=False, allow_null=True
+    )
+    requests_per_second = serializers.FloatField(
+        write_only=True, required=False, allow_null=True
+    )
+    cooldown_ms = serializers.IntegerField(
+        write_only=True, required=False, allow_null=True
+    )
+    max_retries = serializers.IntegerField(
+        write_only=True, required=False, allow_null=True
+    )
     # NEW: Custom provider configuration fields
     custom_endpoint = serializers.CharField(
         write_only=True, required=False, allow_blank=True, allow_null=True
@@ -377,6 +389,10 @@ class AIProviderSerializer(serializers.ModelSerializer):
         max_tokens = validated_data.pop('max_tokens', None)
         temperature = validated_data.pop('temperature', None)
         prompt_template = validated_data.pop('prompt_template', None)
+        max_threads = validated_data.pop('max_threads', None)
+        requests_per_second = validated_data.pop('requests_per_second', None)
+        cooldown_ms = validated_data.pop('cooldown_ms', None)
+        max_retries = validated_data.pop('max_retries', None)
         custom_endpoint = validated_data.pop('custom_endpoint', None)
         request_format = validated_data.pop('request_format', None)
         response_path = validated_data.pop('response_path', None)
@@ -404,6 +420,18 @@ class AIProviderSerializer(serializers.ModelSerializer):
         # NEW: Save prompt template
         if prompt_template is not None:
             config['prompt_template'] = prompt_template
+
+        if max_threads is not None:
+            config['max_threads'] = max_threads
+
+        if requests_per_second is not None:
+            config['requests_per_second'] = requests_per_second
+
+        if cooldown_ms is not None:
+            config['cooldown_ms'] = cooldown_ms
+
+        if max_retries is not None:
+            config['max_retries'] = max_retries
 
         # NEW: Custom provider fields
         if custom_endpoint is not None:
@@ -452,6 +480,10 @@ class AIProviderSerializer(serializers.ModelSerializer):
             # Standard parameters
             data['max_tokens_display'] = instance.config.get('max_tokens')
             data['temperature_display'] = instance.config.get('temperature')
+            data['max_threads_display'] = instance.config.get('max_threads')
+            data['requests_per_second_display'] = instance.config.get('requests_per_second')
+            data['cooldown_ms_display'] = instance.config.get('cooldown_ms')
+            data['max_retries_display'] = instance.config.get('max_retries')
             
             # Custom provider configuration
             data['custom_endpoint_display'] = instance.config.get('custom_endpoint')
@@ -464,6 +496,10 @@ class AIProviderSerializer(serializers.ModelSerializer):
             data['prompt_template'] = None
             data['max_tokens_display'] = None
             data['temperature_display'] = None
+            data['max_threads_display'] = None
+            data['requests_per_second_display'] = None
+            data['cooldown_ms_display'] = None
+            data['max_retries_display'] = None
             data['custom_endpoint_display'] = None
             data['response_path_display'] = None
             data['headers_template_display'] = None
