@@ -3675,7 +3675,6 @@ class AttributeManagementViewSet(viewsets.ViewSet):
         name = request.data.get('name', attribute.attribute_name).strip()
         description = request.data.get('description', attribute.description or '').strip()
         options = request.data.get('options')
-        subclass_ids = request.data.get('subclass_ids')
         
         try:
             with transaction.atomic():
@@ -3699,34 +3698,6 @@ class AttributeManagementViewSet(viewsets.ViewSet):
                                 attribute=attribute,
                                 option_value=option_value.strip()
                             )
-                
-                # Update subclass mappings if provided
-                if subclass_ids is not None:
-                    new_subclass_ids = set(subclass_ids)
-                    existing_subclass_ids = set(
-                        AttributeSubclassMap.objects.filter(attribute=attribute)
-                        .values_list('subclass_id', flat=True)
-                    )
-                    
-                    # Remove mappings that are no longer needed
-                    to_remove = existing_subclass_ids - new_subclass_ids
-                    if to_remove:
-                        AttributeSubclassMap.objects.filter(
-                            attribute=attribute,
-                            subclass_id__in=to_remove
-                        ).delete()
-                    
-                    # Add new mappings
-                    to_add = new_subclass_ids - existing_subclass_ids
-                    for subclass_id in to_add:
-                        try:
-                            subclass = SubClass.objects.get(id=subclass_id)
-                            AttributeSubclassMap.objects.get_or_create(
-                                attribute=attribute,
-                                subclass=subclass
-                            )
-                        except SubClass.DoesNotExist:
-                            continue
                 
                 return Response({
                     'message': 'Attribute updated successfully',
