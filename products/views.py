@@ -10,7 +10,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.core.paginator import Paginator
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 import random
 import threading
 import time
@@ -1679,17 +1679,26 @@ class HumanAnnotatorViewSet(viewsets.ModelViewSet):
             ).count()
             
             # Calculate productivity
-            completed_items = assignment_items.filter(status='human_done').count()
+            completed_items_qs = assignment_items.filter(status='human_done')
+            completed_items = completed_items_qs.count()
             total_items = assignment_items.count()
             
             # Average completion time
             completed_times = []
-            for item in assignment_items.filter(status='human_done'):
-                if item.started_at and item.completed_at:
-                    completion_time = (item.completed_at - item.started_at).total_seconds() / 60  # in minutes
+            total_work_hours = 0
+            for item in completed_items_qs:
+                started_at = item.started_at or item.created_at
+                completed_at = item.completed_at or item.updated_at
+                if started_at and completed_at and completed_at >= started_at:
+                    completion_time = (completed_at - started_at).total_seconds() / 60
                     completed_times.append(completion_time)
+                    total_work_hours += (completed_at - started_at).total_seconds() / 3600
             
-            avg_completion_time = sum(completed_times) / len(completed_times) if completed_times else None
+            avg_completion_time = sum(completed_times) / len(completed_times) if completed_times else 0
+            
+            items_per_hour = 0
+            if total_work_hours > 0:
+                items_per_hour = completed_items / total_work_hours
             
             stats.append({
                 'id': annotator.id,
@@ -1702,6 +1711,8 @@ class HumanAnnotatorViewSet(viewsets.ModelViewSet):
                 'completion_rate': (completed_items / total_items * 100) if total_items > 0 else 0,
                 'annotations_count': annotations_count,
                 'avg_completion_time': avg_completion_time,
+                'items_per_hour': round(items_per_hour, 2),
+                'total_work_hours': round(total_work_hours, 2),
                 'last_active': assignment_items.aggregate(
                     last_active=Max('updated_at')
                 )['last_active']
@@ -3174,6 +3185,7 @@ class DashboardViewSet(viewsets.ViewSet):
                 'pending': BatchAssignment.objects.filter(status='pending').values('batch').distinct().count(),
                 'in_progress': BatchAssignment.objects.filter(status='in_progress').values('batch').distinct().count(),
                 'completed': BatchAssignment.objects.filter(status='completed').values('batch').distinct().count(),
+                'failed': BatchAssignment.objects.filter(status='failed').values('batch').distinct().count(),
                 'ai': AnnotationBatch.objects.filter(batch_type='ai').count(),
                 'human': AnnotationBatch.objects.filter(batch_type='human').count(),
             }
@@ -3194,18 +3206,74 @@ class DashboardViewSet(viewsets.ViewSet):
                     assignment__assignment_type='human',
                     assignment__assignment_id=annotator.id
                 )
-                completed = items.filter(status='human_done').count()
+                completed_items_qs = items.filter(status='human_done')
+                completed = completed_items_qs.count()
                 total_items = items.count()
                 completion_rate = (completed / total_items * 100) if total_items else 0
+                total_work_hours = 0
+                for item in completed_items_qs:
+                    started_at = item.started_at or item.created_at
+                    completed_at = item.completed_at or item.updated_at
+                    if started_at and completed_at and completed_at >= started_at:
+                        total_work_hours += (completed_at - started_at).total_seconds() / 3600
+                items_per_hour = (completed / total_work_hours) if total_work_hours > 0 else 0
+
+                completed_batch_item_ids = list(
+                    completed_items_qs.values_list('batch_item_id', flat=True)
+                )
+                compared = 0
+                matches = 0
+                if completed_batch_item_ids:
+                    human_annotations = list(
+                        ProductAnnotation.objects.filter(
+                            source_type='human',
+                            source_id=annotator.id,
+                            attribute__is_active=True,
+                            batch_item_id__in=completed_batch_item_ids,
+                        ).values('product_id', 'attribute_id', 'value')
+                    )
+                    annotation_keys = {
+                        (ann['product_id'], ann['attribute_id']) for ann in human_annotations
+                    }
+                    product_ids = {key[0] for key in annotation_keys}
+                    attribute_ids = {key[1] for key in annotation_keys}
+                    ai_annotations = ProductAnnotation.objects.filter(
+                        source_type='ai',
+                        attribute__is_active=True,
+                        product_id__in=product_ids,
+                        attribute_id__in=attribute_ids,
+                    ).values('product_id', 'attribute_id', 'value')
+
+                    ai_values_map = {}
+                    for ann in ai_annotations:
+                        value = ann['value']
+                        if value is None:
+                            continue
+                        key = (ann['product_id'], ann['attribute_id'])
+                        ai_values_map.setdefault(key, []).append(str(value).strip())
+
+                    for ann in human_annotations:
+                        key = (ann['product_id'], ann['attribute_id'])
+                        ai_values = ai_values_map.get(key)
+                        if not ai_values:
+                            continue
+                        consensus, _ = Counter(ai_values).most_common(1)[0]
+                        human_value = '' if ann['value'] is None else str(ann['value']).strip()
+                        compared += 1
+                        if human_value.lower() == str(consensus).strip().lower():
+                            matches += 1
+
+                accuracy_rate = (matches / compared * 100) if compared else 0
+                change_rate = ((compared - matches) / compared * 100) if compared else 0
                 annotator_metrics.append({
                     'id': annotator.id,
                     'username': annotator.user.username,
                     'completed_items': completed,
                     'total_assigned': total_items,
                     'completion_rate': completion_rate,
-                    'accuracy_rate': 100.0,
-                    'change_rate': 0.0,
-                    'items_per_hour': 0.0,
+                    'accuracy_rate': accuracy_rate,
+                    'change_rate': change_rate,
+                    'items_per_hour': round(items_per_hour, 2),
                 })
             
             ai_processed = BaseProduct.objects.exclude(
