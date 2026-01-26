@@ -473,6 +473,7 @@ class BatchAssignment(models.Model):
         ('in_progress', 'In Progress'),
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
+        ('failed', 'Failed'),
     ]
     
     id = models.BigAutoField(primary_key=True)
