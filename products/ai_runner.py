@@ -307,14 +307,17 @@ class AIBatchProcessor:
                     time.sleep(2 ** attempt)  # Exponential backoff
 
     def _update_assignment_progress(self, assignment: BatchAssignment) -> None:
-        """Update assignment progress percentage."""
+        """Update assignment progress percentage and handle failures."""
         items = BatchAssignmentItem.objects.filter(assignment=assignment)
         total = items.count()
         completed = items.filter(status="ai_done").count()
+        failed = items.filter(status="ai_failed").count()
         progress = (completed / total * 100) if total else 0
 
         assignment.progress = progress
-        if completed == total and total > 0:
+        if failed > 0:
+            assignment.status = "failed"
+        elif completed == total and total > 0:
             assignment.status = "completed"
         assignment.save(update_fields=["progress", "status", "updated_at"])
 
@@ -458,8 +461,8 @@ class AIBatchProcessor:
         return max(delay_from_rps, delay_from_cooldown)
 
     def _mark_assignment_failed(self, assignment: BatchAssignment, message: str) -> None:
-        """Mark assignment as cancelled."""
-        assignment.status = "cancelled"
+        """Mark assignment as failed."""
+        assignment.status = "failed"
         assignment.progress = 0
         assignment.save(update_fields=["status", "progress", "updated_at"])
         items = BatchAssignmentItem.objects.filter(assignment=assignment).exclude(status="ai_done")
@@ -469,4 +472,4 @@ class AIBatchProcessor:
             id__in=product_ids,
             processing_status__in=["pending", "pending_ai", "ai_in_progress"],
         ).update(processing_status="ai_failed", updated_at=timezone.now())
-        logger.warning(f"Assignment {assignment.id} cancelled: {message}")
+        logger.warning(f"Assignment {assignment.id} failed: {message}")
