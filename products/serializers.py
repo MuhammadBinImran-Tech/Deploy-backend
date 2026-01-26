@@ -572,6 +572,8 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
         assignments = BatchAssignment.objects.filter(batch=obj)
         if not assignments.exists():
             return 'pending'
+        if assignments.filter(status='failed').exists():
+            return 'failed'
         if assignments.filter(status='in_progress').exists():
             return 'in_progress'
         if assignments.filter(status='pending').exists():
