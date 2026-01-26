@@ -7,10 +7,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from .ai_service import get_ai_service
@@ -88,56 +89,98 @@ class AIBatchProcessor:
         
         # Only update to in_progress if not already processing
         assignments.filter(status='pending').update(status="in_progress")
+        assignment_list = list(assignments)
+        pause_event = threading.Event()
 
-        for assignment in assignments:
-            # Check if paused
-            if AIProcessingControl.get_control().is_paused:
-                logger.info(f"Processing paused for batch {batch_id}")
-                assignment.status = 'pending'
-                assignment.save(update_fields=["status", "updated_at"])
-                return
-            
-            provider = self._find_provider(assignment.assignment_id)
-            if not provider:
-                self._mark_assignment_failed(assignment, "Provider inactive or missing")
-                continue
+        with ThreadPoolExecutor(max_workers=max(len(assignment_list), 1)) as executor:
+            futures = {
+                executor.submit(self._process_assignment, assignment, pause_event): assignment
+                for assignment in assignment_list
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception:
+                    assignment = futures[future]
+                    logger.exception(f"Provider worker failed for assignment {assignment.id}")
 
-            assignment_items = (
-                BatchAssignmentItem.objects.filter(assignment=assignment)
-                .select_related("batch_item__product")
-                .exclude(status='ai_done')  # Skip already completed
-                .order_by("id")
-            )
-
-            for item in assignment_items:
-                # Check pause before each item
-                if AIProcessingControl.get_control().is_paused:
-                    logger.info(f"Paused mid-batch {batch_id}")
-                    item.status = "pending_ai"
-                    item.save(update_fields=["status", "updated_at"])
-                    return
-
-                self._process_assignment_item(item, provider)
-
-            self._update_assignment_progress(assignment)
+        if pause_event.is_set() or AIProcessingControl.get_control().is_paused:
+            logger.info(f"Batch {batch_id} paused before completion")
+            return
 
         # After all providers finish, update product statuses
         self._finalize_products(batch_id)
         logger.info(f"Batch {batch_id} processing complete")
 
-    def _process_assignment_item(self, assignment_item: BatchAssignmentItem, provider: AIProvider) -> None:
+    def _process_assignment(self, assignment: BatchAssignment, pause_event: threading.Event) -> None:
+        """Process a single provider assignment using a thread pool."""
+        close_old_connections()
+
+        if AIProcessingControl.get_control().is_paused:
+            logger.info(f"Processing paused for assignment {assignment.id}")
+            assignment.status = 'pending'
+            assignment.save(update_fields=["status", "updated_at"])
+            pause_event.set()
+            return
+
+        provider = self._find_provider(assignment.assignment_id)
+        if not provider:
+            self._mark_assignment_failed(assignment, "Provider inactive or missing")
+            return
+
+        assignment_items = list(
+            BatchAssignmentItem.objects.filter(assignment=assignment)
+            .select_related("batch_item__product")
+            .exclude(status='ai_done')  # Skip already completed
+            .order_by("id")
+        )
+
+        max_threads = self._get_provider_config_int(provider, "max_threads", 50, min_value=1)
+        request_delay_seconds = self._get_provider_request_delay(provider, max_threads)
+
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = []
+            for item in assignment_items:
+                if AIProcessingControl.get_control().is_paused:
+                    logger.info(f"Paused mid-batch {assignment.batch_id}")
+                    assignment.status = 'pending'
+                    assignment.save(update_fields=["status", "updated_at"])
+                    pause_event.set()
+                    break
+                futures.append(
+                    executor.submit(self._process_assignment_item, item, provider, request_delay_seconds)
+                )
+
+            if pause_event.is_set():
+                for future in futures:
+                    future.cancel()
+
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception:
+                    logger.exception(f"AI provider {provider.name} item worker failed")
+                if AIProcessingControl.get_control().is_paused:
+                    assignment.status = 'pending'
+                    assignment.save(update_fields=["status", "updated_at"])
+                    pause_event.set()
+                    break
+
+        self._update_assignment_progress(assignment)
+
+    def _process_assignment_item(
+        self,
+        assignment_item: BatchAssignmentItem,
+        provider: AIProvider,
+        request_delay_seconds: float = 0.0,
+    ) -> None:
         """Process a single assignment item with retries."""
+        close_old_connections()
         product = assignment_item.batch_item.product
         product_info = self._build_product_payload(product)
         attributes = self._get_attributes(product)
 
-        max_retries = provider.config.get("max_retries", 3) if provider.config else 3
-        try:
-            max_retries = int(max_retries)
-        except (TypeError, ValueError):
-            max_retries = 3
-        if max_retries < 1:
-            max_retries = 1
+        max_retries = self._get_provider_config_int(provider, "max_retries", 3, min_value=1)
         attempt = 0
 
         assignment_item.status = "ai_in_progress"
@@ -165,6 +208,9 @@ class AIBatchProcessor:
                 return
 
             try:
+                if request_delay_seconds > 0:
+                    time.sleep(request_delay_seconds)
+
                 service = get_ai_service(provider.id)
                 annotations = service.annotate_product(
                     product_info=product_info,
@@ -261,14 +307,17 @@ class AIBatchProcessor:
                     time.sleep(2 ** attempt)  # Exponential backoff
 
     def _update_assignment_progress(self, assignment: BatchAssignment) -> None:
-        """Update assignment progress percentage."""
+        """Update assignment progress percentage and handle failures."""
         items = BatchAssignmentItem.objects.filter(assignment=assignment)
         total = items.count()
         completed = items.filter(status="ai_done").count()
+        failed = items.filter(status="ai_failed").count()
         progress = (completed / total * 100) if total else 0
 
         assignment.progress = progress
-        if completed == total and total > 0:
+        if failed > 0:
+            assignment.status = "failed"
+        elif completed == total and total > 0:
             assignment.status = "completed"
         assignment.save(update_fields=["progress", "status", "updated_at"])
 
@@ -372,9 +421,48 @@ class AIBatchProcessor:
                 return provider
         return None
 
+    def _get_provider_config_int(
+        self,
+        provider: AIProvider,
+        key: str,
+        default: int,
+        min_value: Optional[int] = None,
+        max_value: Optional[int] = None,
+    ) -> int:
+        value = provider.config.get(key) if provider.config else None
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = default
+        if min_value is not None:
+            value = max(value, min_value)
+        if max_value is not None:
+            value = min(value, max_value)
+        return value
+
+    def _get_provider_request_delay(self, provider: AIProvider, max_threads: int) -> float:
+        config = provider.config or {}
+        delay_from_rps = 0.0
+        try:
+            requests_per_second = float(config.get("requests_per_second") or 0)
+        except (TypeError, ValueError):
+            requests_per_second = 0.0
+        if requests_per_second > 0:
+            delay_from_rps = 1.0 / requests_per_second
+
+        delay_from_cooldown = 0.0
+        try:
+            cooldown_ms = float(config.get("cooldown_ms") or 0)
+        except (TypeError, ValueError):
+            cooldown_ms = 0.0
+        if cooldown_ms > 0 and max_threads > 0:
+            delay_from_cooldown = (cooldown_ms / 1000.0) / max_threads
+
+        return max(delay_from_rps, delay_from_cooldown)
+
     def _mark_assignment_failed(self, assignment: BatchAssignment, message: str) -> None:
-        """Mark assignment as cancelled."""
-        assignment.status = "cancelled"
+        """Mark assignment as failed."""
+        assignment.status = "failed"
         assignment.progress = 0
         assignment.save(update_fields=["status", "progress", "updated_at"])
         items = BatchAssignmentItem.objects.filter(assignment=assignment).exclude(status="ai_done")
@@ -384,4 +472,4 @@ class AIBatchProcessor:
             id__in=product_ids,
             processing_status__in=["pending", "pending_ai", "ai_in_progress"],
         ).update(processing_status="ai_failed", updated_at=timezone.now())
-        logger.warning(f"Assignment {assignment.id} cancelled: {message}")
+        logger.warning(f"Assignment {assignment.id} failed: {message}")
