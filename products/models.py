@@ -388,6 +388,46 @@ class AIProvider(models.Model):
         return self.name
 
 
+class AIProviderSubclassPrompt(models.Model):
+    """
+    tbl_ai_provider_subclass_prompts table
+    Stores subclass-specific prompts for AI providers
+    """
+    id = models.BigAutoField(primary_key=True)
+    provider = models.ForeignKey(
+        AIProvider,
+        on_delete=models.CASCADE,
+        db_column='provider_id',
+        related_name='subclass_prompts'
+    )
+    subclass = models.ForeignKey(
+        SubClass,
+        on_delete=models.CASCADE,
+        db_column='subclass_id',
+        related_name='ai_prompts'
+    )
+    prompt_template = models.TextField(
+        help_text="Custom prompt template for this provider-subclass combination. "
+                  "Use template variables: {product_info}, {attributes}"
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'tbl_ai_provider_subclass_prompts'
+        managed = True
+        verbose_name = 'AI Provider Subclass Prompt'
+        verbose_name_plural = 'AI Provider Subclass Prompts'
+        unique_together = ('provider', 'subclass')
+        indexes = [
+            models.Index(fields=['provider', 'subclass', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.provider.name} - {self.subclass.name}"
+
+
 class HumanAnnotator(models.Model):
     """tbl_human_annotator table"""
     id = models.BigAutoField(primary_key=True)
