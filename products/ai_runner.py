@@ -15,14 +15,13 @@ from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from .ai_service import get_ai_service
+from .attribute_utils import get_active_subclass_attribute_maps
 from .models import (
     AIProcessingControl,
     AIProcessingRun,
     AIProvider,
     AIProviderFailureLog,
-    AttributeGlobalMap,
     AttributeOption,
-    AttributeSubclassMap,
     BatchAssignment,
     BatchAssignmentItem,
     BaseProduct,
@@ -366,6 +365,11 @@ class AIBatchProcessor:
             "description": product.style_description or "",
             "category": product.class_name or "",
             "subcategory": product.subclass_name or "",
+            "department": product.dept_name or "",
+            "subdepartment": product.subdept_name or "",
+            "class_name": product.class_name or "",
+            "subclass_name": product.subclass_name or "",
+            "subclass_id": product.subclass_id if product.subclass else None,
             "image_url": product.primary_image_url,
         }
 
@@ -373,19 +377,25 @@ class AIBatchProcessor:
         """Get applicable attributes with allowed values."""
         attributes: List[AttributePayload] = []
 
-        global_maps = AttributeGlobalMap.objects.select_related("attribute")
-        subclass_maps = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass
-        ).select_related("attribute") if product.subclass else []
+        subclass_maps = list(get_active_subclass_attribute_maps(product.subclass))
 
         attribute_ids: List[int] = []
-        for map_obj in list(global_maps) + list(subclass_maps):
-            attribute_ids.append(map_obj.attribute.id)
+        seen_attribute_ids = set()
+        for map_obj in subclass_maps:
+            attribute_id = map_obj.attribute.id
+            if attribute_id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(attribute_id)
+            attribute_ids.append(attribute_id)
 
         option_map = self._build_option_map(attribute_ids)
 
-        for map_obj in list(global_maps) + list(subclass_maps):
+        added_attribute_ids = set()
+        for map_obj in subclass_maps:
             attr = map_obj.attribute
+            if attr.id in added_attribute_ids:
+                continue
+            added_attribute_ids.add(attr.id)
             attributes.append(
                 AttributePayload(
                     id=attr.id,

@@ -115,6 +115,29 @@ class AIProviderAdmin(admin.ModelAdmin):
     list_per_page = 20
 
 
+@admin.register(AIProviderSubclassPrompt)
+class AIProviderSubclassPromptAdmin(admin.ModelAdmin):
+    list_display = ['id', 'provider', 'subclass', 'is_active', 'created_at']
+    list_filter = ['is_active', 'provider', 'created_at']
+    search_fields = ['provider__name', 'subclass__name', 'prompt_template']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    list_per_page = 20
+    
+    fieldsets = (
+        ('Configuration', {
+            'fields': ('provider', 'subclass', 'is_active')
+        }),
+        ('Prompt Template', {
+            'fields': ('prompt_template',),
+            'description': 'Use template variables: {product_info}, {attributes}, {style_id}, {description}, {subclass_name}'
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+
 @admin.register(HumanAnnotator)
 class HumanAnnotatorAdmin(admin.ModelAdmin):
     list_display = ['id', 'user', 'get_username', 'get_email']

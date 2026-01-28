@@ -7,6 +7,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 from products.models import *
 from products.ai_runner import AIBatchProcessor
+from products.attribute_utils import get_active_subclass_attribute_maps
 import random
 import time
 from datetime import datetime
@@ -405,18 +406,8 @@ class Command(BaseCommand):
         
         attributes = []
         
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.all().select_related('attribute')
-        for map_obj in global_attrs:
-            attributes.append({
-                'id': map_obj.attribute.id,
-                'name': map_obj.attribute.attribute_name
-            })
-        
         # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
             attributes.append({

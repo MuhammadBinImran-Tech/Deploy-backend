@@ -2,6 +2,11 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import *
+from .attribute_utils import (
+    filter_annotations_to_subclass,
+    get_active_subclass_attribute_ids,
+    get_active_subclass_attribute_maps,
+)
 from collections import Counter, defaultdict
 
 BATCH_ITEM_STATUS_CLIENT_MAP = {
@@ -222,24 +227,7 @@ class ProductDetailSerializer(ProductSerializer):
             return []
         
         attributes = []
-        
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attributes.append({
-                'id': map_obj.attribute.id,
-                'name': map_obj.attribute.attribute_name,
-                'description': map_obj.attribute.description,
-                'scope': 'global'
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=obj.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(obj.subclass)
         
         for map_obj in subclass_attrs:
             attributes.append({
@@ -257,6 +245,7 @@ class ProductDetailSerializer(ProductSerializer):
             source_type='ai',
             attribute__is_active=True
         ).select_related('attribute')
+        annotations = filter_annotations_to_subclass(annotations, obj.subclass)
         
         result = []
         for ann in annotations:
@@ -278,6 +267,7 @@ class ProductDetailSerializer(ProductSerializer):
             source_type='human',
             attribute__is_active=True
         ).select_related('attribute')
+        annotations = filter_annotations_to_subclass(annotations, obj.subclass)
         
         result = []
         for ann in annotations:
@@ -310,17 +300,28 @@ class ProductDetailSerializer(ProductSerializer):
                     result.append({
                         'batch_id': batch_item.batch.id,
                         'batch_name': batch_item.batch.name,
+                        'display_name': self._get_batch_display_name(batch_item.batch),
                         'batch_type': batch_item.batch.batch_type,
                         'assignment_id': assignment.id,
                         'assignment_type': assignment.assignment_type,
                         'assignee_name': assignment.assignee_name,
-                        'status': assignment_item.status,
+                        'status': assignment.status,
+                        'item_status': assignment_item.status,
                         'progress': assignment.progress
                     })
                 except BatchAssignmentItem.DoesNotExist:
                     continue
         
         return result
+
+    def _get_batch_display_name(self, batch):
+        if not batch.batch_type:
+            return batch.name or "Batch"
+        batch_number = AnnotationBatch.objects.filter(
+            batch_type=batch.batch_type,
+            id__lte=batch.id
+        ).count()
+        return f"{batch.batch_type.upper()} Batch #{batch_number}"
 
 
 class AIProviderSerializer(serializers.ModelSerializer):
@@ -512,6 +513,45 @@ class AIProviderSerializer(serializers.ModelSerializer):
         return data
 
 
+class AIProviderSubclassPromptSerializer(serializers.ModelSerializer):
+    """Serializer for AI Provider Subclass Prompts"""
+    provider_name = serializers.CharField(source='provider.name', read_only=True)
+    subclass_name = serializers.CharField(source='subclass.name', read_only=True)
+    
+    class Meta:
+        model = AIProviderSubclassPrompt
+        fields = [
+            'id',
+            'provider',
+            'provider_name',
+            'subclass',
+            'subclass_name',
+            'prompt_template',
+            'is_active',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class AIProviderSubclassPromptCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating subclass prompts"""
+    
+    class Meta:
+        model = AIProviderSubclassPrompt
+        fields = ['provider', 'subclass', 'prompt_template', 'is_active']
+    
+    def validate(self, data):
+        """Validate that prompt template is not empty"""
+        if self.partial and 'prompt_template' not in data:
+            return data
+        if not data.get('prompt_template', '').strip():
+            raise serializers.ValidationError({
+                'prompt_template': 'Prompt template cannot be empty'
+            })
+        return data
+
+
 class HumanAnnotatorSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True)
     email = serializers.CharField(source='user.email', read_only=True)
@@ -575,6 +615,8 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
         if assignments.filter(status='failed').exists():
             return 'failed'
         if assignments.filter(status='in_progress').exists():
+            return 'in_progress'
+        if assignments.filter(status='completed').exists() and assignments.filter(status='pending').exists():
             return 'in_progress'
         if assignments.filter(status='pending').exists():
             return 'pending'
@@ -743,42 +785,21 @@ class BatchAssignmentItemSerializer(serializers.ModelSerializer):
         if not product.subclass:
             return []
         
+        valid_attr_ids = set(get_active_subclass_attribute_ids(product.subclass))
+        if not valid_attr_ids:
+            return []
+        
         # Get existing annotations for this product
         existing_annotations = ProductAnnotation.objects.filter(
-            product=product
+            product=product,
+            attribute_id__in=valid_attr_ids,
         ).select_related('attribute')
         
         existing_attr_ids = {ann.attribute_id for ann in existing_annotations}
         
         attributes = []
         
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attr = map_obj.attribute
-            # Check if already annotated by this source
-            existing_ann = existing_annotations.filter(
-                attribute=attr,
-                source_type=obj.assignment.assignment_type,
-                source_id=obj.assignment.assignment_id
-            ).first()
-            
-            attributes.append({
-                'id': attr.id,
-                'name': attr.attribute_name,
-                'description': attr.description,
-                'scope': 'global',
-                'already_annotated': attr.id in existing_attr_ids,
-                'current_value': existing_ann.value if existing_ann else None
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
             attr = map_obj.attribute
@@ -824,18 +845,9 @@ class AnnotatorBatchItemSerializer(serializers.ModelSerializer):
         return build_attribute_options_map(attribute_ids)
     
     def _get_applicable_attribute_queryset(self, product):
-        global_attrs = list(
-            AttributeGlobalMap.objects.filter(attribute__is_active=True).select_related('attribute')
-        )
-        subclass_attrs = []
-        if product.subclass:
-            subclass_attrs = list(
-                AttributeSubclassMap.objects.filter(
-                    subclass=product.subclass,
-                    attribute__is_active=True
-                ).select_related('attribute')
-            )
-        return global_attrs, subclass_attrs
+        if not product.subclass:
+            return []
+        return list(get_active_subclass_attribute_maps(product.subclass))
     
     def get_ai_suggestions(self, obj):
         product = obj.batch_item.product
@@ -844,6 +856,7 @@ class AnnotatorBatchItemSerializer(serializers.ModelSerializer):
             source_type='ai',
             attribute__is_active=True
         ).select_related('attribute')
+        annotations = filter_annotations_to_subclass(annotations, product.subclass)
         
         attribute_ids = {ann.attribute_id for ann in annotations}
         option_map = self._get_attribute_options(attribute_ids)
@@ -900,6 +913,7 @@ class AnnotatorBatchItemSerializer(serializers.ModelSerializer):
             source_type='human',
             attribute__is_active=True
         ).select_related('attribute')
+        queryset = filter_annotations_to_subclass(queryset, product.subclass)
         
         if annotator_id:
             queryset = queryset.filter(source_id=annotator_id)
@@ -930,18 +944,9 @@ class AnnotatorBatchItemSerializer(serializers.ModelSerializer):
     
     def get_applicable_attributes(self, obj):
         product = obj.batch_item.product
-        global_attrs, subclass_attrs = self._get_applicable_attribute_queryset(product)
+        subclass_attrs = self._get_applicable_attribute_queryset(product)
         attribute_ids = []
         attributes = []
-        
-        for map_obj in global_attrs:
-            attribute_ids.append(map_obj.attribute.id)
-            attributes.append({
-                'id': map_obj.attribute.id,
-                'name': map_obj.attribute.attribute_name,
-                'data_type': 'text',
-                'allowed_values': None,
-            })
         
         for map_obj in subclass_attrs:
             attribute_ids.append(map_obj.attribute.id)

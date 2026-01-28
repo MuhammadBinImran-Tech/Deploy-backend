@@ -18,6 +18,11 @@ from datetime import timedelta
 from .models import *
 from .serializers import *
 from .ai_runner import AIBatchProcessor
+from .attribute_utils import (
+    filter_annotations_to_subclass,
+    get_active_subclass_attribute_ids,
+    get_active_subclass_attribute_maps,
+)
 from rest_framework.decorators import action
 
 logger = logging.getLogger(__name__)
@@ -306,20 +311,7 @@ class BatchCreationMixin:
             return []
         
         attributes = []
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attributes.append({
-                'id': map_obj.attribute.id,
-                'name': map_obj.attribute.attribute_name,
-                'description': map_obj.attribute.description
-            })
-        
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
             attributes.append({
@@ -360,15 +352,22 @@ class AssignmentProgressMixin:
         
         if assignment.assignment_type == 'ai':
             completed_items = items.filter(status='ai_done').count()
+            in_progress_items = items.filter(status='ai_in_progress').count()
         else:
             completed_items = items.filter(status='human_done').count()
+            in_progress_items = items.filter(status='human_in_progress').count()
         
         progress = (completed_items / total_items * 100) if total_items > 0 else 0
         
         assignment.progress = progress
         
-        if completed_items == total_items and total_items > 0:
-            assignment.status = 'completed'
+        if assignment.status not in ['failed', 'cancelled']:
+            if completed_items == total_items and total_items > 0:
+                assignment.status = 'completed'
+            elif completed_items > 0 or in_progress_items > 0:
+                assignment.status = 'in_progress'
+            else:
+                assignment.status = 'pending'
         
         assignment.save()
     
@@ -378,13 +377,23 @@ class AssignmentProgressMixin:
             assignment__assignment_type='human'
         )
         
+        if not product_assignments.exists():
+            return
+
         all_done = all(
-            assignment_item.status == 'human_done' 
+            assignment_item.status == 'human_done'
             for assignment_item in product_assignments
         )
-        
-        if all_done and product.processing_status == 'human_in_progress':
+        any_started = any(
+            assignment_item.status in ['human_in_progress', 'human_done']
+            for assignment_item in product_assignments
+        )
+
+        if all_done:
             product.processing_status = 'human_done'
+            product.save()
+        elif any_started and product.processing_status != 'human_done':
+            product.processing_status = 'human_in_progress'
             product.save()
 
 
@@ -1401,6 +1410,7 @@ class ProductViewSet(BatchCreationMixin, AssignmentProgressMixin, viewsets.Model
             product=product,
             attribute__is_active=True
         ).select_related('attribute').order_by('-created_at')
+        annotations = filter_annotations_to_subclass(annotations, product.subclass)
         
         # Group by attribute
         grouped_annotations = {}
@@ -1445,24 +1455,7 @@ class ProductViewSet(BatchCreationMixin, AssignmentProgressMixin, viewsets.Model
             return []
         
         attributes = []
-        
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attributes.append({
-                'id': map_obj.attribute.id,
-                'name': map_obj.attribute.attribute_name,
-                'description': map_obj.attribute.description,
-                'scope': 'global'
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
             attributes.append({
@@ -1561,22 +1554,10 @@ class AttributeViewSet(viewsets.ModelViewSet):
                     'description': map_obj.attribute.description,
                     'scope': 'subclass'
                 })
-            
-            # Get global attributes
-            global_attrs = AttributeGlobalMap.objects.filter(
-                attribute__is_active=True
-            ).select_related('attribute')
             global_attrs_data = []
-            for map_obj in global_attrs:
-                global_attrs_data.append({
-                    'id': map_obj.attribute.id,
-                    'name': map_obj.attribute.attribute_name,
-                    'description': map_obj.attribute.description,
-                    'scope': 'global'
-                })
             
             # Get attribute options
-            all_attribute_ids = [attr['id'] for attr in subclass_attrs_data + global_attrs_data]
+            all_attribute_ids = [attr['id'] for attr in subclass_attrs_data]
             attribute_options = AttributeOption.objects.filter(
                 attribute_id__in=all_attribute_ids,
                 attribute__is_active=True
@@ -1608,6 +1589,96 @@ class AIProviderViewSet(viewsets.ModelViewSet):
     serializer_class = AIProviderSerializer
     permission_classes = [permissions.IsAuthenticated & IsAdmin]
     pagination_class = StandardPagination
+
+
+class AIProviderSubclassPromptViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing AI Provider Subclass Prompts.
+    """
+    queryset = AIProviderSubclassPrompt.objects.all()
+    permission_classes = [permissions.IsAuthenticated & IsAdmin]
+
+    def get_serializer_class(self):
+        if self.action in ['create', 'update', 'partial_update']:
+            return AIProviderSubclassPromptCreateSerializer
+        return AIProviderSubclassPromptSerializer
+
+    def get_queryset(self):
+        """
+        Optionally filter by provider or subclass.
+        Query params: ?provider=1&subclass=5
+        """
+        queryset = AIProviderSubclassPrompt.objects.select_related(
+            'provider', 'subclass'
+        ).order_by('provider__name', 'subclass__name')
+
+        provider_id = self.request.query_params.get('provider')
+        subclass_id = self.request.query_params.get('subclass')
+
+        if provider_id:
+            queryset = queryset.filter(provider_id=provider_id)
+        if subclass_id:
+            queryset = queryset.filter(subclass_id=subclass_id)
+
+        return queryset
+
+    @action(detail=False, methods=['get'])
+    def by_provider(self, request):
+        """
+        Get all subclass prompts for a specific provider.
+        GET /api/ai-provider-subclass-prompts/by_provider/?provider_id=1
+        """
+        provider_id = request.query_params.get('provider_id')
+        if not provider_id:
+            return Response(
+                {'error': 'provider_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        prompts = self.get_queryset().filter(provider_id=provider_id)
+        serializer = self.get_serializer(prompts, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        """
+        Create multiple subclass prompts at once.
+        """
+        provider_id = request.data.get('provider_id')
+        prompts_data = request.data.get('prompts', [])
+
+        if not provider_id or not prompts_data:
+            return Response(
+                {'error': 'provider_id and prompts are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        created_prompts = []
+        errors = []
+
+        for prompt_data in prompts_data:
+            prompt_data['provider'] = provider_id
+            if 'subclass' not in prompt_data and 'subclass_id' in prompt_data:
+                prompt_data['subclass'] = prompt_data.get('subclass_id')
+            serializer = AIProviderSubclassPromptCreateSerializer(data=prompt_data)
+
+            if serializer.is_valid():
+                prompt = serializer.save()
+                created_prompts.append(
+                    AIProviderSubclassPromptSerializer(prompt).data
+                )
+            else:
+                errors.append({
+                    'subclass_id': prompt_data.get('subclass') or prompt_data.get('subclass_id'),
+                    'errors': serializer.errors
+                })
+
+        return Response({
+            'created': created_prompts,
+            'errors': errors,
+            'success_count': len(created_prompts),
+            'error_count': len(errors)
+        }, status=status.HTTP_201_CREATED if created_prompts else status.HTTP_400_BAD_REQUEST)
 
 
 class HumanAnnotatorViewSet(viewsets.ModelViewSet):
@@ -2180,7 +2251,7 @@ class AnnotationBatchViewSet(BatchCreationMixin, viewsets.ModelViewSet):
                 status_label = 'failed'
             elif total > 0 and completed == total:
                 status_label = 'completed'
-            elif item_stats['in_progress'] > 0:
+            elif completed > 0 or item_stats['in_progress'] > 0:
                 status_label = 'in_progress'
             else:
                 status_label = 'pending'
@@ -2687,6 +2758,13 @@ class ProductAnnotationViewSet(AssignmentProgressMixin, viewsets.ModelViewSet):
         product_id = self.request.query_params.get('product_id')
         if product_id:
             queryset = queryset.filter(product_id=product_id)
+            product = BaseProduct.objects.filter(id=product_id).select_related('subclass').first()
+            if not product or not product.subclass:
+                return ProductAnnotation.objects.none()
+            valid_attr_ids = get_active_subclass_attribute_ids(product.subclass)
+            if not valid_attr_ids:
+                return ProductAnnotation.objects.none()
+            queryset = queryset.filter(attribute_id__in=valid_attr_ids)
         
         # Filter by attribute
         attribute_id = self.request.query_params.get('attribute_id')
@@ -2841,14 +2919,6 @@ class ProductAnnotationViewSet(AssignmentProgressMixin, viewsets.ModelViewSet):
         if not product.subclass:
             return False
         
-        # Check if attribute is global
-        is_global = AttributeGlobalMap.objects.filter(
-            attribute=attribute,
-            attribute__is_active=True
-        ).exists()
-        if is_global:
-            return True
-        
         # Check if attribute is mapped to product's subclass
         is_mapped = AttributeSubclassMap.objects.filter(
             attribute=attribute,
@@ -2889,22 +2959,7 @@ class ProductAnnotationViewSet(AssignmentProgressMixin, viewsets.ModelViewSet):
             return []
         
         attributes = []
-        
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attributes.append({
-                'id': map_obj.attribute.id,
-                'name': map_obj.attribute.attribute_name
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
             attributes.append({
@@ -3548,22 +3603,7 @@ class AutoAIProcessingViewSet(viewsets.ViewSet):
             return []
         
         attributes = []
-        
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attributes.append({
-                'id': map_obj.attribute.id,
-                'name': map_obj.attribute.attribute_name
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
             attributes.append({
