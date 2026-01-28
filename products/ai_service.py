@@ -6,9 +6,12 @@ Includes image analysis capabilities for vision-enabled models
 Now supports custom prompts per provider
 """
 import json
+import logging
 import requests
 from typing import Dict, List, Any, Optional
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 class AIServiceError(Exception):
     """Custom exception for AI service errors"""
@@ -80,10 +83,13 @@ class UniversalAIService:
                 - service_name: e.g., 'openai', 'anthropic', 'custom'
                 - model_name: Model to use
                 - config: JSON with api_key, max_tokens, temperature, custom_endpoint, prompt_template
+                - provider_id: Provider database ID (for subclass prompts)
         """
         self.service_name = provider_config.get('service_name', '').lower()
         self.model_name = provider_config.get('model_name')
-        self.config = provider_config.get('config', {})
+        self.config = provider_config.get('config', {}) or {}
+        if provider_config.get('provider_id') is not None:
+            self.config['provider_id'] = provider_config.get('provider_id')
         self.api_key = self.config.get('api_key')
         self.max_tokens = self.config.get('max_tokens', 2000)
         self.temperature = self.config.get('temperature', 0.1)
@@ -201,24 +207,63 @@ class UniversalAIService:
         attributes: List[Dict[str, Any]]
     ) -> str:
         """
-        Build prompt for AI annotation.
-        Uses custom prompt_template if available, otherwise uses default.
+        Build prompt for AI annotation with subclass-specific template support.
         """
-        # If provider has a custom prompt template, use it
-        if self.prompt_template:
-            return self._build_custom_prompt(product_info, attributes)
-        
-        # Otherwise, use the default prompt
+        template = self._get_prompt_template(product_info)
+        if template:
+            return self._build_custom_prompt(template, product_info, attributes)
         return self._build_default_prompt(product_info, attributes)
+
+    def _get_prompt_template(self, product_info: Dict[str, Any]) -> Optional[str]:
+        """
+        Resolve prompt template with subclass-specific logic.
+
+        Priority:
+        1. Subclass-specific prompt (if product has subclass)
+        2. Provider-specific prompt
+        3. Default prompt (None)
+        """
+        from .models import AIProviderSubclassPrompt
+
+        subclass_id = product_info.get('subclass_id')
+        provider_id = self.config.get('provider_id')
+
+        if subclass_id and provider_id:
+            try:
+                subclass_prompt = AIProviderSubclassPrompt.objects.get(
+                    provider_id=provider_id,
+                    subclass_id=subclass_id,
+                    is_active=True
+                )
+                logger.info(
+                    "Using subclass-specific prompt for provider %s subclass %s",
+                    provider_id,
+                    subclass_id,
+                )
+                return subclass_prompt.prompt_template
+            except AIProviderSubclassPrompt.DoesNotExist:
+                logger.info(
+                    "No subclass-specific prompt found for provider %s subclass %s",
+                    provider_id,
+                    subclass_id,
+                )
+
+        if self.prompt_template:
+            logger.info("Using provider-specific prompt")
+            return self.prompt_template
+
+        logger.info("Using default system prompt")
+        return None
     
     def _build_custom_prompt(
         self,
+        template: str,
         product_info: Dict[str, Any],
         attributes: List[Dict[str, Any]]
     ) -> str:
         """
         Build prompt using provider's custom template.
-        Supports variable substitution with {{variable_name}} syntax.
+        Supports both {variable_name} and {{VARIABLE_NAME}} styles.
 
         AVAILABLE VARIABLES:
         - {{PRODUCT_INFO}}: Style ID, Name, Description, Category, Subcategory
@@ -230,7 +275,17 @@ class UniversalAIService:
         - {{CATEGORY}}: Product category
         - {{SUBCATEGORY}}: Product subcategory
         """
-        template = self.prompt_template
+        if "{{" in template or "}}" in template:
+            return self._build_double_brace_prompt(template, product_info, attributes)
+        return self._build_single_brace_prompt(template, product_info, attributes)
+
+    def _build_double_brace_prompt(
+        self,
+        template: str,
+        product_info: Dict[str, Any],
+        attributes: List[Dict[str, Any]]
+    ) -> str:
+        """Build prompt using {{VARIABLE}} replacement."""
         
         # Build attribute list for template
         attributes_text = self._format_attributes_for_template(attributes)
@@ -266,6 +321,54 @@ class UniversalAIService:
             prompt = prompt.replace(var, value)
         
         return prompt
+
+    def _build_single_brace_prompt(
+        self,
+        template: str,
+        product_info: Dict[str, Any],
+        attributes: List[Dict[str, Any]]
+    ) -> str:
+        """Build prompt using {variable} substitution without format parsing."""
+        product_info_text = self._format_product_info_block(product_info)
+        attributes_text = self._format_attributes_block(attributes)
+        replacements = {
+            '{product_info}': product_info_text,
+            '{attributes}': attributes_text,
+            '{style_id}': str(product_info.get('style_id', 'N/A')),
+            '{description}': str(product_info.get('description', 'N/A')),
+            '{image_url}': str(product_info.get('image_url', 'N/A')),
+            '{department}': str(product_info.get('department', 'N/A')),
+            '{subdepartment}': str(product_info.get('subdepartment', 'N/A')),
+            '{class_name}': str(product_info.get('class_name', 'N/A')),
+            '{subclass_name}': str(product_info.get('subclass_name', 'N/A')),
+        }
+        prompt = template
+        for token, value in replacements.items():
+            prompt = prompt.replace(token, value)
+        return prompt
+
+    def _format_product_info_block(self, product_info: Dict[str, Any]) -> str:
+        product_text = f"""Product Information:
+- Style ID: {product_info.get('style_id', 'N/A')}
+- Description: {product_info.get('description', 'N/A')}
+- Department: {product_info.get('department', 'N/A')}
+- Sub-Department: {product_info.get('subdepartment', 'N/A')}
+- Class: {product_info.get('class_name', 'N/A')}
+- Subclass: {product_info.get('subclass_name', 'N/A')}"""
+
+        if product_info.get('image_url'):
+            product_text += "\n- Image: Available for analysis"
+        return product_text
+
+    def _format_attributes_block(self, attributes: List[Dict[str, Any]]) -> str:
+        attributes_text = "Attributes to annotate:\n"
+        for attr in attributes:
+            attributes_text += f"\n{attr['name']}:\n"
+            if attr.get('description'):
+                attributes_text += f"  Description: {attr['description']}\n"
+            if attr.get('allowed_values'):
+                attributes_text += f"  Allowed values: {', '.join(attr['allowed_values'])}\n"
+        return attributes_text
     
     def _format_product_info_for_template(self, product_info: Dict[str, Any]) -> str:
         """Format product information for template substitution"""
@@ -706,7 +809,8 @@ def get_ai_service(provider_id: int) -> UniversalAIService:
     provider_config = {
         'service_name': provider.service_name,
         'model_name': provider.model_name,
-        'config': provider.config or {}
+        'config': provider.config or {},
+        'provider_id': provider_id
     }
     
     return UniversalAIService(provider_config)
