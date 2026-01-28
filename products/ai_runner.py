@@ -366,6 +366,11 @@ class AIBatchProcessor:
             "description": product.style_description or "",
             "category": product.class_name or "",
             "subcategory": product.subclass_name or "",
+            "department": product.dept_name or "",
+            "subdepartment": product.subdept_name or "",
+            "class_name": product.class_name or "",
+            "subclass_name": product.subclass_name or "",
+            "subclass_id": product.subclass_id if product.subclass else None,
             "image_url": product.primary_image_url,
         }
 
@@ -373,19 +378,35 @@ class AIBatchProcessor:
         """Get applicable attributes with allowed values."""
         attributes: List[AttributePayload] = []
 
-        global_maps = AttributeGlobalMap.objects.select_related("attribute")
-        subclass_maps = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass
-        ).select_related("attribute") if product.subclass else []
+        global_maps = AttributeGlobalMap.objects.filter(
+            attribute__is_active=True
+        ).select_related("attribute")
+        subclass_maps = (
+            AttributeSubclassMap.objects.filter(
+                subclass=product.subclass,
+                attribute__is_active=True
+            ).select_related("attribute")
+            if product.subclass
+            else []
+        )
 
         attribute_ids: List[int] = []
+        seen_attribute_ids = set()
         for map_obj in list(global_maps) + list(subclass_maps):
-            attribute_ids.append(map_obj.attribute.id)
+            attribute_id = map_obj.attribute.id
+            if attribute_id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(attribute_id)
+            attribute_ids.append(attribute_id)
 
         option_map = self._build_option_map(attribute_ids)
 
+        added_attribute_ids = set()
         for map_obj in list(global_maps) + list(subclass_maps):
             attr = map_obj.attribute
+            if attr.id in added_attribute_ids:
+                continue
+            added_attribute_ids.add(attr.id)
             attributes.append(
                 AttributePayload(
                     id=attr.id,
