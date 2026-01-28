@@ -18,6 +18,11 @@ from datetime import timedelta
 from .models import *
 from .serializers import *
 from .ai_runner import AIBatchProcessor
+from .attribute_utils import (
+    filter_annotations_to_subclass,
+    get_active_subclass_attribute_ids,
+    get_active_subclass_attribute_maps,
+)
 from rest_framework.decorators import action
 
 logger = logging.getLogger(__name__)
@@ -306,33 +311,11 @@ class BatchCreationMixin:
             return []
         
         attributes = []
-        seen_attribute_ids = set()
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
-            attributes.append({
-                'id': attr_id,
-                'name': map_obj.attribute.attribute_name,
-                'description': map_obj.attribute.description
-            })
-        
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
             attributes.append({
-                'id': attr_id,
+                'id': map_obj.attribute.id,
                 'name': map_obj.attribute.attribute_name,
                 'description': map_obj.attribute.description
             })
@@ -1427,6 +1410,7 @@ class ProductViewSet(BatchCreationMixin, AssignmentProgressMixin, viewsets.Model
             product=product,
             attribute__is_active=True
         ).select_related('attribute').order_by('-created_at')
+        annotations = filter_annotations_to_subclass(annotations, product.subclass)
         
         # Group by attribute
         grouped_annotations = {}
@@ -1471,37 +1455,11 @@ class ProductViewSet(BatchCreationMixin, AssignmentProgressMixin, viewsets.Model
             return []
         
         attributes = []
-        seen_attribute_ids = set()
-        
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
-            attributes.append({
-                'id': attr_id,
-                'name': map_obj.attribute.attribute_name,
-                'description': map_obj.attribute.description,
-                'scope': 'global'
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
             attributes.append({
-                'id': attr_id,
+                'id': map_obj.attribute.id,
                 'name': map_obj.attribute.attribute_name,
                 'description': map_obj.attribute.description,
                 'scope': 'subclass'
@@ -1596,22 +1554,10 @@ class AttributeViewSet(viewsets.ModelViewSet):
                     'description': map_obj.attribute.description,
                     'scope': 'subclass'
                 })
-            
-            # Get global attributes
-            global_attrs = AttributeGlobalMap.objects.filter(
-                attribute__is_active=True
-            ).select_related('attribute')
             global_attrs_data = []
-            for map_obj in global_attrs:
-                global_attrs_data.append({
-                    'id': map_obj.attribute.id,
-                    'name': map_obj.attribute.attribute_name,
-                    'description': map_obj.attribute.description,
-                    'scope': 'global'
-                })
             
             # Get attribute options
-            all_attribute_ids = [attr['id'] for attr in subclass_attrs_data + global_attrs_data]
+            all_attribute_ids = [attr['id'] for attr in subclass_attrs_data]
             attribute_options = AttributeOption.objects.filter(
                 attribute_id__in=all_attribute_ids,
                 attribute__is_active=True
@@ -2812,6 +2758,13 @@ class ProductAnnotationViewSet(AssignmentProgressMixin, viewsets.ModelViewSet):
         product_id = self.request.query_params.get('product_id')
         if product_id:
             queryset = queryset.filter(product_id=product_id)
+            product = BaseProduct.objects.filter(id=product_id).select_related('subclass').first()
+            if not product or not product.subclass:
+                return ProductAnnotation.objects.none()
+            valid_attr_ids = get_active_subclass_attribute_ids(product.subclass)
+            if not valid_attr_ids:
+                return ProductAnnotation.objects.none()
+            queryset = queryset.filter(attribute_id__in=valid_attr_ids)
         
         # Filter by attribute
         attribute_id = self.request.query_params.get('attribute_id')
@@ -2966,14 +2919,6 @@ class ProductAnnotationViewSet(AssignmentProgressMixin, viewsets.ModelViewSet):
         if not product.subclass:
             return False
         
-        # Check if attribute is global
-        is_global = AttributeGlobalMap.objects.filter(
-            attribute=attribute,
-            attribute__is_active=True
-        ).exists()
-        if is_global:
-            return True
-        
         # Check if attribute is mapped to product's subclass
         is_mapped = AttributeSubclassMap.objects.filter(
             attribute=attribute,
@@ -3014,35 +2959,11 @@ class ProductAnnotationViewSet(AssignmentProgressMixin, viewsets.ModelViewSet):
             return []
         
         attributes = []
-        seen_attribute_ids = set()
-        
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
-            attributes.append({
-                'id': attr_id,
-                'name': map_obj.attribute.attribute_name
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
             attributes.append({
-                'id': attr_id,
+                'id': map_obj.attribute.id,
                 'name': map_obj.attribute.attribute_name
             })
         
@@ -3682,35 +3603,11 @@ class AutoAIProcessingViewSet(viewsets.ViewSet):
             return []
         
         attributes = []
-        seen_attribute_ids = set()
-        
-        # Get global attributes
-        global_attrs = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related('attribute')
-        for map_obj in global_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
-            attributes.append({
-                'id': attr_id,
-                'name': map_obj.attribute.attribute_name
-            })
-        
-        # Get subclass-specific attributes
-        subclass_attrs = AttributeSubclassMap.objects.filter(
-            subclass=product.subclass,
-            attribute__is_active=True
-        ).select_related('attribute')
+        subclass_attrs = get_active_subclass_attribute_maps(product.subclass)
         
         for map_obj in subclass_attrs:
-            attr_id = map_obj.attribute.id
-            if attr_id in seen_attribute_ids:
-                continue
-            seen_attribute_ids.add(attr_id)
             attributes.append({
-                'id': attr_id,
+                'id': map_obj.attribute.id,
                 'name': map_obj.attribute.attribute_name
             })
         
