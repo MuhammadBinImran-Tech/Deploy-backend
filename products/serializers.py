@@ -310,17 +310,28 @@ class ProductDetailSerializer(ProductSerializer):
                     result.append({
                         'batch_id': batch_item.batch.id,
                         'batch_name': batch_item.batch.name,
+                        'display_name': self._get_batch_display_name(batch_item.batch),
                         'batch_type': batch_item.batch.batch_type,
                         'assignment_id': assignment.id,
                         'assignment_type': assignment.assignment_type,
                         'assignee_name': assignment.assignee_name,
-                        'status': assignment_item.status,
+                        'status': assignment.status,
+                        'item_status': assignment_item.status,
                         'progress': assignment.progress
                     })
                 except BatchAssignmentItem.DoesNotExist:
                     continue
         
         return result
+
+    def _get_batch_display_name(self, batch):
+        if not batch.batch_type:
+            return batch.name or "Batch"
+        batch_number = AnnotationBatch.objects.filter(
+            batch_type=batch.batch_type,
+            id__lte=batch.id
+        ).count()
+        return f"{batch.batch_type.upper()} Batch #{batch_number}"
 
 
 class AIProviderSerializer(serializers.ModelSerializer):
@@ -512,6 +523,45 @@ class AIProviderSerializer(serializers.ModelSerializer):
         return data
 
 
+class AIProviderSubclassPromptSerializer(serializers.ModelSerializer):
+    """Serializer for AI Provider Subclass Prompts"""
+    provider_name = serializers.CharField(source='provider.name', read_only=True)
+    subclass_name = serializers.CharField(source='subclass.name', read_only=True)
+    
+    class Meta:
+        model = AIProviderSubclassPrompt
+        fields = [
+            'id',
+            'provider',
+            'provider_name',
+            'subclass',
+            'subclass_name',
+            'prompt_template',
+            'is_active',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class AIProviderSubclassPromptCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating subclass prompts"""
+    
+    class Meta:
+        model = AIProviderSubclassPrompt
+        fields = ['provider', 'subclass', 'prompt_template', 'is_active']
+    
+    def validate(self, data):
+        """Validate that prompt template is not empty"""
+        if self.partial and 'prompt_template' not in data:
+            return data
+        if not data.get('prompt_template', '').strip():
+            raise serializers.ValidationError({
+                'prompt_template': 'Prompt template cannot be empty'
+            })
+        return data
+
+
 class HumanAnnotatorSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True)
     email = serializers.CharField(source='user.email', read_only=True)
@@ -575,6 +625,8 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
         if assignments.filter(status='failed').exists():
             return 'failed'
         if assignments.filter(status='in_progress').exists():
+            return 'in_progress'
+        if assignments.filter(status='completed').exists() and assignments.filter(status='pending').exists():
             return 'in_progress'
         if assignments.filter(status='pending').exists():
             return 'pending'
