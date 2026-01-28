@@ -222,14 +222,19 @@ class ProductDetailSerializer(ProductSerializer):
             return []
         
         attributes = []
+        seen_attribute_ids = set()
         
         # Get global attributes
         global_attrs = AttributeGlobalMap.objects.filter(
             attribute__is_active=True
         ).select_related('attribute')
         for map_obj in global_attrs:
+            attr_id = map_obj.attribute.id
+            if attr_id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(attr_id)
             attributes.append({
-                'id': map_obj.attribute.id,
+                'id': attr_id,
                 'name': map_obj.attribute.attribute_name,
                 'description': map_obj.attribute.description,
                 'scope': 'global'
@@ -242,8 +247,12 @@ class ProductDetailSerializer(ProductSerializer):
         ).select_related('attribute')
         
         for map_obj in subclass_attrs:
+            attr_id = map_obj.attribute.id
+            if attr_id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(attr_id)
             attributes.append({
-                'id': map_obj.attribute.id,
+                'id': attr_id,
                 'name': map_obj.attribute.attribute_name,
                 'description': map_obj.attribute.description,
                 'scope': 'subclass'
@@ -803,6 +812,7 @@ class BatchAssignmentItemSerializer(serializers.ModelSerializer):
         existing_attr_ids = {ann.attribute_id for ann in existing_annotations}
         
         attributes = []
+        seen_attribute_ids = set()
         
         # Get global attributes
         global_attrs = AttributeGlobalMap.objects.filter(
@@ -810,6 +820,9 @@ class BatchAssignmentItemSerializer(serializers.ModelSerializer):
         ).select_related('attribute')
         for map_obj in global_attrs:
             attr = map_obj.attribute
+            if attr.id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(attr.id)
             # Check if already annotated by this source
             existing_ann = existing_annotations.filter(
                 attribute=attr,
@@ -834,6 +847,9 @@ class BatchAssignmentItemSerializer(serializers.ModelSerializer):
         
         for map_obj in subclass_attrs:
             attr = map_obj.attribute
+            if attr.id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(attr.id)
             # Check if already annotated by this source
             existing_ann = existing_annotations.filter(
                 attribute=attr,
@@ -985,8 +1001,12 @@ class AnnotatorBatchItemSerializer(serializers.ModelSerializer):
         global_attrs, subclass_attrs = self._get_applicable_attribute_queryset(product)
         attribute_ids = []
         attributes = []
+        seen_attribute_ids = set()
         
         for map_obj in global_attrs:
+            if map_obj.attribute.id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(map_obj.attribute.id)
             attribute_ids.append(map_obj.attribute.id)
             attributes.append({
                 'id': map_obj.attribute.id,
@@ -996,6 +1016,9 @@ class AnnotatorBatchItemSerializer(serializers.ModelSerializer):
             })
         
         for map_obj in subclass_attrs:
+            if map_obj.attribute.id in seen_attribute_ids:
+                continue
+            seen_attribute_ids.add(map_obj.attribute.id)
             attribute_ids.append(map_obj.attribute.id)
             attributes.append({
                 'id': map_obj.attribute.id,
