@@ -15,14 +15,13 @@ from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from .ai_service import get_ai_service
+from .attribute_utils import get_active_subclass_attribute_maps
 from .models import (
     AIProcessingControl,
     AIProcessingRun,
     AIProvider,
     AIProviderFailureLog,
-    AttributeGlobalMap,
     AttributeOption,
-    AttributeSubclassMap,
     BatchAssignment,
     BatchAssignmentItem,
     BaseProduct,
@@ -378,21 +377,11 @@ class AIBatchProcessor:
         """Get applicable attributes with allowed values."""
         attributes: List[AttributePayload] = []
 
-        global_maps = AttributeGlobalMap.objects.filter(
-            attribute__is_active=True
-        ).select_related("attribute")
-        subclass_maps = (
-            AttributeSubclassMap.objects.filter(
-                subclass=product.subclass,
-                attribute__is_active=True
-            ).select_related("attribute")
-            if product.subclass
-            else []
-        )
+        subclass_maps = list(get_active_subclass_attribute_maps(product.subclass))
 
         attribute_ids: List[int] = []
         seen_attribute_ids = set()
-        for map_obj in list(global_maps) + list(subclass_maps):
+        for map_obj in subclass_maps:
             attribute_id = map_obj.attribute.id
             if attribute_id in seen_attribute_ids:
                 continue
@@ -402,7 +391,7 @@ class AIBatchProcessor:
         option_map = self._build_option_map(attribute_ids)
 
         added_attribute_ids = set()
-        for map_obj in list(global_maps) + list(subclass_maps):
+        for map_obj in subclass_maps:
             attr = map_obj.attribute
             if attr.id in added_attribute_ids:
                 continue
