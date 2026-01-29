@@ -129,7 +129,7 @@ class AIProviderSubclassPromptAdmin(admin.ModelAdmin):
         }),
         ('Prompt Template', {
             'fields': ('prompt_template',),
-            'description': 'Use template variables: {product_info}, {attributes}, {style_id}, {description}, {subclass_name}'
+            'description': 'Use template variables: {{PRODUCT_INFO}}, {{ATTRIBUTES}}, {{IMAGE_INFO}}, {{STYLE_ID}}, {{NAME}}, {{DESCRIPTION}}, {{CATEGORY}}, {{SUBCATEGORY}}'
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
