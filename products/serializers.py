@@ -26,6 +26,29 @@ PRODUCT_STATUS_CLIENT_MAP = {
     'human_done': 'reviewed',
 }
 
+LEGACY_PROMPT_TOKENS = [
+    '{product_info}',
+    '{attributes}',
+    '{style_id}',
+    '{description}',
+    '{image_url}',
+    '{department}',
+    '{subdepartment}',
+    '{class_name}',
+    '{subclass_name}',
+]
+
+
+def validate_prompt_template_syntax(template: str) -> str:
+    if not template:
+        return template
+    for token in LEGACY_PROMPT_TOKENS:
+        if token in template:
+            raise serializers.ValidationError(
+                f"Legacy prompt token '{token}' is not supported. "
+                "Use {{VARIABLE}} syntax (e.g., {{PRODUCT_INFO}}, {{ATTRIBUTES}})."
+            )
+    return template
 
 def map_product_status_to_client(status: str) -> str:
     """Map database processing status to client-facing status codes."""
@@ -380,6 +403,12 @@ class AIProviderSerializer(serializers.ModelSerializer):
         model = AIProvider
         fields = '__all__'
         read_only_fields = ['id', 'created_at']
+
+    def validate(self, attrs):
+        prompt_template = attrs.get('prompt_template')
+        if prompt_template is not None:
+            validate_prompt_template_syntax(prompt_template)
+        return super().validate(attrs)
     
     def _merge_config_fields(self, instance, validated_data):
         """
@@ -534,6 +563,20 @@ class AIProviderSubclassPromptSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
 
+class AIGlobalPromptSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIGlobalPrompt
+        fields = ['prompt_template', 'updated_at']
+        read_only_fields = ['updated_at']
+
+    def validate_prompt_template(self, value):
+        value = value or ''
+        if not value.strip():
+            raise serializers.ValidationError('Prompt template cannot be empty')
+        validate_prompt_template_syntax(value)
+        return value
+
+
 class AIProviderSubclassPromptCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating subclass prompts"""
     
@@ -545,10 +588,12 @@ class AIProviderSubclassPromptCreateSerializer(serializers.ModelSerializer):
         """Validate that prompt template is not empty"""
         if self.partial and 'prompt_template' not in data:
             return data
-        if not data.get('prompt_template', '').strip():
+        prompt_template = data.get('prompt_template', '')
+        if not prompt_template.strip():
             raise serializers.ValidationError({
                 'prompt_template': 'Prompt template cannot be empty'
             })
+        validate_prompt_template_syntax(prompt_template)
         return data
 
 
