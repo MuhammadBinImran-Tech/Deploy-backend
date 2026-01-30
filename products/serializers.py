@@ -646,6 +646,21 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
 
     def get_items_count(self, obj):
         return obj.batchitem_set.count()
+
+    def _get_annotator_assignment(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user:
+            return None
+        if not request.user.groups.filter(name='Annotator').exists():
+            return None
+        annotator = HumanAnnotator.objects.filter(user=request.user).first()
+        if not annotator:
+            return None
+        return BatchAssignment.objects.filter(
+            batch=obj,
+            assignment_type='human',
+            assignment_id=annotator.id
+        ).first()
     
     def get_assignments_count(self, obj):
         return BatchAssignment.objects.filter(batch=obj).count()
@@ -654,6 +669,9 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
         return self.get_items_count(obj)
     
     def get_status(self, obj):
+        annotator_assignment = self._get_annotator_assignment(obj)
+        if annotator_assignment:
+            return annotator_assignment.status
         assignments = BatchAssignment.objects.filter(batch=obj)
         if not assignments.exists():
             return 'pending'
@@ -672,6 +690,9 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
         return assignments.first().status
     
     def get_progress(self, obj):
+        annotator_assignment = self._get_annotator_assignment(obj)
+        if annotator_assignment:
+            return annotator_assignment.progress or 0
         assignments = BatchAssignment.objects.filter(batch=obj)
         progress_values = list(assignments.values_list('progress', flat=True))
         if not progress_values:
@@ -696,6 +717,13 @@ class AnnotationBatchSerializer(serializers.ModelSerializer):
             status_field = 'human_done' if assignment.assignment_type == 'human' else 'ai_done'
             return BatchAssignmentItem.objects.filter(
                 assignment=assignment,
+                status=status_field
+            ).count()
+        annotator_assignment = self._get_annotator_assignment(obj)
+        if annotator_assignment:
+            status_field = 'human_done' if annotator_assignment.assignment_type == 'human' else 'ai_done'
+            return BatchAssignmentItem.objects.filter(
+                assignment=annotator_assignment,
                 status=status_field
             ).count()
         # Default to completed products in batch
