@@ -618,107 +618,91 @@ class ProductViewSet(BatchCreationMixin, AssignmentProgressMixin, viewsets.Model
     
     @action(detail=False, methods=['get'])
     def filter_options(self, request):
-        """Get hierarchical filter options based on selected filters"""
-        # Get current filter values from query params
+        """
+        Return filter options where each filter never filters its own option list.
+        Only other active filters are applied when building options for a filter.
+        """
         selected_class = request.query_params.get('class', '').strip()
         selected_subclass = request.query_params.get('subclass', '').strip()
         selected_department = request.query_params.get('department', '').strip()
         selected_subdepartment = request.query_params.get('subdepartment', '').strip()
-        
-        # Start with all products
+
         base_queryset = BaseProduct.objects.all()
-        
-        # Apply hierarchical filtering logic
-        queryset = base_queryset
-        applied_filters = {}
-        
-        # Apply filters in order of priority
-        if selected_subdepartment and selected_subdepartment != 'all':
-            queryset = queryset.filter(
-                Q(subdept_name__iexact=selected_subdepartment) | 
-                Q(subdepartment__name__iexact=selected_subdepartment)
-            )
-            applied_filters['subdepartment'] = selected_subdepartment
-        
-        if selected_department and selected_department != 'all':
-            queryset = queryset.filter(
-                Q(dept_name__iexact=selected_department) | 
-                Q(department__name__iexact=selected_department)
-            )
-            applied_filters['department'] = selected_department
-        
-        if selected_class and selected_class != 'all':
-            queryset = queryset.filter(
-                Q(class_name__iexact=selected_class) | 
-                Q(class_field__name__iexact=selected_class)
-            )
-            applied_filters['class'] = selected_class
-        
-        if selected_subclass and selected_subclass != 'all':
-            queryset = queryset.filter(
-                Q(subclass_name__iexact=selected_subclass) | 
-                Q(subclass__name__iexact=selected_subclass)
-            )
-            applied_filters['subclass'] = selected_subclass
-        
-        # Get available options based on current filters
+
+        def apply_filters(qs, *, exclude=None):
+            if exclude != 'department' and selected_department and selected_department != 'all':
+                qs = qs.filter(
+                    Q(dept_name__iexact=selected_department) |
+                    Q(department__name__iexact=selected_department)
+                )
+
+            if exclude != 'subdepartment' and selected_subdepartment and selected_subdepartment != 'all':
+                qs = qs.filter(
+                    Q(subdept_name__iexact=selected_subdepartment) |
+                    Q(subdepartment__name__iexact=selected_subdepartment)
+                )
+
+            if exclude != 'class' and selected_class and selected_class != 'all':
+                qs = qs.filter(
+                    Q(class_name__iexact=selected_class) |
+                    Q(class_field__name__iexact=selected_class)
+                )
+
+            if exclude != 'subclass' and selected_subclass and selected_subclass != 'all':
+                qs = qs.filter(
+                    Q(subclass_name__iexact=selected_subclass) |
+                    Q(subclass__name__iexact=selected_subclass)
+                )
+
+            return qs
+
+        def distinct_field_values(qs, field_name):
+            return qs.exclude(
+                Q(**{f"{field_name}__isnull": True}) | Q(**{field_name: ''})
+            ).values_list(field_name, flat=True).distinct()
+
         result = {}
-        
-        # Classes - Show options based on current filters
-        if 'class' not in applied_filters:
-            class_from_field = queryset.exclude(
-                Q(class_name__isnull=True) | Q(class_name='')
-            ).values_list('class_name', flat=True).distinct()
-            class_from_relation = queryset.filter(
-                class_field__isnull=False
-            ).values_list('class_field__name', flat=True).distinct()
-            result['classes'] = sorted(set(list(class_from_field) + list(class_from_relation)))
-        else:
-            result['classes'] = [selected_class]
-        
-        # Subclasses - Based on current filters
-        if 'subclass' not in applied_filters:
-            subclass_from_field = queryset.exclude(
-                Q(subclass_name__isnull=True) | Q(subclass_name='')
-            ).values_list('subclass_name', flat=True).distinct()
-            subclass_from_relation = queryset.filter(
-                subclass__isnull=False
-            ).values_list('subclass__name', flat=True).distinct()
-            result['subclasses'] = sorted(set(list(subclass_from_field) + list(subclass_from_relation)))
-        else:
-            result['subclasses'] = [selected_subclass]
-        
-        # Departments - Based on current filters
-        if 'department' not in applied_filters:
-            dept_from_field = queryset.exclude(
-                Q(dept_name__isnull=True) | Q(dept_name='')
-            ).values_list('dept_name', flat=True).distinct()
-            dept_from_relation = queryset.filter(
-                department__isnull=False
-            ).values_list('department__name', flat=True).distinct()
-            result['departments'] = sorted(set(list(dept_from_field) + list(dept_from_relation)))
-        else:
-            result['departments'] = [selected_department]
-        
-        # Subdepartments - Based on current filters
-        if 'subdepartment' not in applied_filters:
-            subdept_from_field = queryset.exclude(
-                Q(subdept_name__isnull=True) | Q(subdept_name='')
-            ).values_list('subdept_name', flat=True).distinct()
-            subdept_from_relation = queryset.filter(
-                subdepartment__isnull=False
-            ).values_list('subdepartment__name', flat=True).distinct()
-            result['subdepartments'] = sorted(set(list(subdept_from_field) + list(subdept_from_relation)))
-        else:
-            result['subdepartments'] = [selected_subdepartment]
-        
-        # Filter out empty strings and None values
-        for key in result:
-            result[key] = [c for c in result[key] if c]
-        
-        # Add metadata about applied filters
+
+        department_qs = apply_filters(base_queryset, exclude='department')
+        department_from_field = distinct_field_values(department_qs, 'dept_name')
+        department_from_relation = department_qs.filter(
+            department__isnull=False
+        ).values_list('department__name', flat=True).distinct()
+        result['departments'] = sorted(set(list(department_from_field) + list(department_from_relation)))
+
+        subdepartment_qs = apply_filters(base_queryset, exclude='subdepartment')
+        subdepartment_from_field = distinct_field_values(subdepartment_qs, 'subdept_name')
+        subdepartment_from_relation = subdepartment_qs.filter(
+            subdepartment__isnull=False
+        ).values_list('subdepartment__name', flat=True).distinct()
+        result['subdepartments'] = sorted(set(list(subdepartment_from_field) + list(subdepartment_from_relation)))
+
+        class_qs = apply_filters(base_queryset, exclude='class')
+        class_from_field = distinct_field_values(class_qs, 'class_name')
+        class_from_relation = class_qs.filter(
+            class_field__isnull=False
+        ).values_list('class_field__name', flat=True).distinct()
+        result['classes'] = sorted(set(list(class_from_field) + list(class_from_relation)))
+
+        subclass_qs = apply_filters(base_queryset, exclude='subclass')
+        subclass_from_field = distinct_field_values(subclass_qs, 'subclass_name')
+        subclass_from_relation = subclass_qs.filter(
+            subclass__isnull=False
+        ).values_list('subclass__name', flat=True).distinct()
+        result['subclasses'] = sorted(set(list(subclass_from_field) + list(subclass_from_relation)))
+
+        applied_filters = {}
+        if selected_department and selected_department != 'all':
+            applied_filters['department'] = selected_department
+        if selected_subdepartment and selected_subdepartment != 'all':
+            applied_filters['subdepartment'] = selected_subdepartment
+        if selected_class and selected_class != 'all':
+            applied_filters['class'] = selected_class
+        if selected_subclass and selected_subclass != 'all':
+            applied_filters['subclass'] = selected_subclass
+
         result['applied_filters'] = applied_filters
-        
+
         return Response(result)
     
     def _get_hierarchical_options(self, base_queryset, filters):
@@ -1589,6 +1573,30 @@ class AIProviderViewSet(viewsets.ModelViewSet):
     serializer_class = AIProviderSerializer
     permission_classes = [permissions.IsAuthenticated & IsAdmin]
     pagination_class = StandardPagination
+
+
+class AIGlobalPromptViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticated & IsAdmin]
+
+    @action(detail=False, methods=['get'])
+    def get_prompt(self, request):
+        prompt_template = AIGlobalPrompt.get_prompt()
+        return Response({'prompt_template': prompt_template})
+
+    @action(detail=False, methods=['post'])
+    def update_prompt(self, request):
+        instance, _ = AIGlobalPrompt.objects.get_or_create(
+            id=1,
+            defaults={'prompt_template': AI_GLOBAL_PROMPT_DEFAULT}
+        )
+        serializer = AIGlobalPromptSerializer(instance, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                'prompt_template': serializer.instance.prompt_template,
+                'updated_at': serializer.instance.updated_at
+            })
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AIProviderSubclassPromptViewSet(viewsets.ModelViewSet):

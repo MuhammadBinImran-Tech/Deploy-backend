@@ -210,9 +210,7 @@ class UniversalAIService:
         Build prompt for AI annotation with subclass-specific template support.
         """
         template = self._get_prompt_template(product_info)
-        if template:
-            return self._build_custom_prompt(template, product_info, attributes)
-        return self._build_default_prompt(product_info, attributes)
+        return self._build_custom_prompt(template, product_info, attributes)
 
     def _get_prompt_template(self, product_info: Dict[str, Any]) -> Optional[str]:
         """
@@ -221,9 +219,9 @@ class UniversalAIService:
         Priority:
         1. Subclass-specific prompt (if product has subclass)
         2. Provider-specific prompt
-        3. Default prompt (None)
+        3. Global default prompt (DB)
         """
-        from .models import AIProviderSubclassPrompt
+        from .models import AIProviderSubclassPrompt, AIGlobalPrompt
 
         subclass_id = product_info.get('subclass_id')
         provider_id = self.config.get('provider_id')
@@ -252,8 +250,8 @@ class UniversalAIService:
             logger.info("Using provider-specific prompt")
             return self.prompt_template
 
-        logger.info("Using default system prompt")
-        return None
+        logger.info("Using global default prompt")
+        return AIGlobalPrompt.get_prompt()
     
     def _build_custom_prompt(
         self,
@@ -262,8 +260,7 @@ class UniversalAIService:
         attributes: List[Dict[str, Any]]
     ) -> str:
         """
-        Build prompt using provider's custom template.
-        Supports both {variable_name} and {{VARIABLE_NAME}} styles.
+        Build prompt using provider's custom template with {{VARIABLE}} syntax only.
 
         AVAILABLE VARIABLES:
         - {{PRODUCT_INFO}}: Style ID, Name, Description, Category, Subcategory
@@ -275,9 +272,15 @@ class UniversalAIService:
         - {{CATEGORY}}: Product category
         - {{SUBCATEGORY}}: Product subcategory
         """
-        if "{{" in template or "}}" in template:
-            return self._build_double_brace_prompt(template, product_info, attributes)
-        return self._build_single_brace_prompt(template, product_info, attributes)
+        legacy_tokens = [
+            '{product_info}', '{attributes}', '{style_id}', '{description}',
+            '{image_url}', '{department}', '{subdepartment}', '{class_name}', '{subclass_name}',
+        ]
+        if any(token in template for token in legacy_tokens):
+            logger.warning(
+                "Legacy prompt tokens detected. Use {{VARIABLE}} syntax (e.g., {{PRODUCT_INFO}}, {{ATTRIBUTES}})."
+            )
+        return self._build_double_brace_prompt(template, product_info, attributes)
 
     def _build_double_brace_prompt(
         self,
@@ -321,54 +324,6 @@ class UniversalAIService:
             prompt = prompt.replace(var, value)
         
         return prompt
-
-    def _build_single_brace_prompt(
-        self,
-        template: str,
-        product_info: Dict[str, Any],
-        attributes: List[Dict[str, Any]]
-    ) -> str:
-        """Build prompt using {variable} substitution without format parsing."""
-        product_info_text = self._format_product_info_block(product_info)
-        attributes_text = self._format_attributes_block(attributes)
-        replacements = {
-            '{product_info}': product_info_text,
-            '{attributes}': attributes_text,
-            '{style_id}': str(product_info.get('style_id', 'N/A')),
-            '{description}': str(product_info.get('description', 'N/A')),
-            '{image_url}': str(product_info.get('image_url', 'N/A')),
-            '{department}': str(product_info.get('department', 'N/A')),
-            '{subdepartment}': str(product_info.get('subdepartment', 'N/A')),
-            '{class_name}': str(product_info.get('class_name', 'N/A')),
-            '{subclass_name}': str(product_info.get('subclass_name', 'N/A')),
-        }
-        prompt = template
-        for token, value in replacements.items():
-            prompt = prompt.replace(token, value)
-        return prompt
-
-    def _format_product_info_block(self, product_info: Dict[str, Any]) -> str:
-        product_text = f"""Product Information:
-- Style ID: {product_info.get('style_id', 'N/A')}
-- Description: {product_info.get('description', 'N/A')}
-- Department: {product_info.get('department', 'N/A')}
-- Sub-Department: {product_info.get('subdepartment', 'N/A')}
-- Class: {product_info.get('class_name', 'N/A')}
-- Subclass: {product_info.get('subclass_name', 'N/A')}"""
-
-        if product_info.get('image_url'):
-            product_text += "\n- Image: Available for analysis"
-        return product_text
-
-    def _format_attributes_block(self, attributes: List[Dict[str, Any]]) -> str:
-        attributes_text = "Attributes to annotate:\n"
-        for attr in attributes:
-            attributes_text += f"\n{attr['name']}:\n"
-            if attr.get('description'):
-                attributes_text += f"  Description: {attr['description']}\n"
-            if attr.get('allowed_values'):
-                attributes_text += f"  Allowed values: {', '.join(attr['allowed_values'])}\n"
-        return attributes_text
     
     def _format_product_info_for_template(self, product_info: Dict[str, Any]) -> str:
         """Format product information for template substitution"""
@@ -405,107 +360,6 @@ Subcategory: {product_info.get('subcategory', 'N/A')}"""
             result += "".join(attributes_without_restrictions)
         
         return result
-    
-    def _build_default_prompt(
-        self,
-        product_info: Dict[str, Any],
-        attributes: List[Dict[str, Any]]
-    ) -> str:
-        """Original default prompt logic with enhanced attribute completeness instructions"""
-        image_url = product_info.get('image_url')
-        has_vision = self.supports_vision()
-
-        product_desc = f"""Product Information:
-    - Style ID: {product_info.get('style_id', 'N/A')}
-    - Name: {product_info.get('name', 'N/A')}
-    - Description: {product_info.get('description', 'N/A')}
-    - Category: {product_info.get('category', 'N/A')}
-    - Subcategory: {product_info.get('subcategory', 'N/A')}"""
-
-        if image_url:
-            if has_vision:
-                product_desc += f"\n- Product Image: [Provided as visual input for analysis]"
-            else:
-                product_desc += f"\n- Product Image URL: {image_url}"
-        else:
-            product_desc += "\n- Product Image: Not available"
-
-        attributes_with_restrictions = []
-        attributes_without_restrictions = []
-
-        for idx, attr in enumerate(attributes, 1):
-            attr_text = f"\n{idx}. {attr['name']}"
-            if attr.get('description'):
-                attr_text += f" - {attr['description']}"
-
-            if attr.get('allowed_values'):
-                attr_text += f"\n   REQUIRED: Choose from: {', '.join(attr['allowed_values'])}"
-                attributes_with_restrictions.append(attr_text)
-            else:
-                attr_text += "\n   FREE-FORM: Provide your best inference based on the product details"
-                attributes_without_restrictions.append(attr_text)
-
-        attributes_desc = "Attributes to annotate:"
-        if attributes_with_restrictions:
-            attributes_desc += "\n\nRestricted Attributes (MUST use allowed values):"
-            attributes_desc += "".join(attributes_with_restrictions)
-
-        if attributes_without_restrictions:
-            attributes_desc += "\n\nFree-form Attributes (provide your best inference):"
-            attributes_desc += "".join(attributes_without_restrictions)
-
-        vision_instruction = ""
-        if has_vision and image_url:
-            vision_instruction = """
-    VISUAL ANALYSIS INSTRUCTIONS:
-    - Carefully analyze the product image provided
-    - Use visual information to determine attributes like color, material, style, pattern, etc.
-    - Cross-reference visual details with the text description
-    - The image is the PRIMARY source of truth for visual attributes
-    """
-
-        # NEW: Add total attribute count for validation
-        total_attributes = len(attributes)
-        attribute_names_list = [attr['name'] for attr in attributes]
-
-        prompt = f"""{product_desc}
-
-    {attributes_desc}
-
-    Critical Instructions:
-    1. Analyze ALL available information: text description AND product image (if provided)
-    2. For RESTRICTED attributes: MUST choose ONLY from the allowed values list
-    - If none of the allowed values fit, you may provide your own value
-    - If you cannot determine any value, use "Unknown"
-    3. For FREE-FORM attributes: Provide your best inference - be descriptive and specific
-    4. ONLY use "Unknown" if:
-    - For restricted attributes: None of the allowed values apply AND you cannot infer a reasonable value
-    - For free-form attributes: You genuinely cannot make ANY reasonable inference from text OR image
-    5. Avoid "Unknown" whenever possible - make educated inferences based on ALL available data
-    6. When image is available: Prioritize visual evidence for appearance-related attributes
-    7. **MANDATORY**: You MUST return EXACTLY {total_attributes} attributes in your response
-    8. **MANDATORY**: Every attribute from the list above MUST be present in your JSON response
-    9. Return ONLY a valid JSON object with attribute names as keys and values as strings
-    {vision_instruction}
-
-    ATTRIBUTE CHECKLIST - YOU MUST INCLUDE ALL {total_attributes} ATTRIBUTES:
-    {chr(10).join(f'- {name}' for name in attribute_names_list)}
-
-    Example response format:
-    {{
-    "Color": "Navy Blue",
-    "Material": "Cotton Blend",
-    "Size": "Large",
-    "Pattern": "Solid",
-    "Fit": "Regular Fit"
-    }}
-
-    CRITICAL REMINDER: Your response MUST contain ALL {total_attributes} attributes listed above. 
-    Missing even one attribute is an error. If you cannot determine a value, use "Unknown".
-
-    Respond with JSON only, no additional text:"""
-
-        return prompt
     
     # Request builders for different providers
     
