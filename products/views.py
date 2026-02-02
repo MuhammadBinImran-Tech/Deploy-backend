@@ -3300,6 +3300,13 @@ class DashboardViewSet(viewsets.ViewSet):
                     }
                     product_ids = {key[0] for key in annotation_keys}
                     attribute_ids = {key[1] for key in annotation_keys}
+                    product_subclass_map = {
+                        product.id: product.subclass
+                        for product in BaseProduct.objects.filter(
+                            id__in=product_ids
+                        ).select_related('subclass')
+                    }
+                    subclass_attribute_ids_cache = {}
                     ai_annotations = ProductAnnotation.objects.filter(
                         source_type='ai',
                         attribute__is_active=True,
@@ -3317,13 +3324,26 @@ class DashboardViewSet(viewsets.ViewSet):
 
                     for ann in human_annotations:
                         key = (ann['product_id'], ann['attribute_id'])
+                        product_subclass = product_subclass_map.get(ann['product_id'])
+                        if not product_subclass:
+                            continue
+                        subclass_id = product_subclass.id
+                        if subclass_id not in subclass_attribute_ids_cache:
+                            subclass_attribute_ids_cache[subclass_id] = set(
+                                get_active_subclass_attribute_ids(product_subclass)
+                            )
+                        if ann['attribute_id'] not in subclass_attribute_ids_cache[subclass_id]:
+                            continue
                         ai_values = ai_values_map.get(key)
                         if not ai_values:
                             continue
                         consensus, _ = Counter(ai_values).most_common(1)[0]
+                        consensus_value = str(consensus).strip()
+                        if consensus_value.lower() == 'unknown':
+                            continue
                         human_value = '' if ann['value'] is None else str(ann['value']).strip()
                         compared += 1
-                        if human_value.lower() == str(consensus).strip().lower():
+                        if human_value.lower() == consensus_value.lower():
                             matches += 1
 
                 accuracy_rate = (matches / compared * 100) if compared else 0
