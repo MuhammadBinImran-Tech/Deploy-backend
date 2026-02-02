@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.contrib.auth.models import User, Group
 from django.db.models import Q, Count, Avg, Max, Min, Sum, Subquery, OuterRef
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.db import transaction
 from django.core.paginator import Paginator
@@ -3419,6 +3420,101 @@ class DashboardViewSet(viewsets.ViewSet):
                 in_progress_items = assignment_items.filter(status='human_in_progress').count()
                 pending_items = assignment_items.filter(status='pending_human').count()
                 completion_rate = (completed_items / total_items * 100) if total_items else 0
+
+                # Daily productivity for the last 14 days (human_done items).
+                days_window = 14
+                today = timezone.now().date()
+                start_date = today - timedelta(days=days_window - 1)
+                daily_counts = (
+                    assignment_items.filter(
+                        status='human_done',
+                        completed_at__isnull=False,
+                        completed_at__date__gte=start_date,
+                    )
+                    .annotate(day=TruncDate('completed_at'))
+                    .values('day')
+                    .annotate(count=Count('id'))
+                    .order_by('day')
+                )
+                daily_count_map = {entry['day']: entry['count'] for entry in daily_counts}
+                daily_productivity = []
+                for offset in range(days_window):
+                    day = start_date + timedelta(days=offset)
+                    daily_productivity.append({
+                        'date': day.isoformat(),
+                        'completed': daily_count_map.get(day, 0),
+                    })
+
+                # AI agreement vs changes for this annotator.
+                completed_items_qs = assignment_items.filter(status='human_done')
+                completed_batch_item_ids = list(
+                    completed_items_qs.values_list('batch_item_id', flat=True)
+                )
+                compared = 0
+                matches = 0
+                if completed_batch_item_ids:
+                    human_annotations = list(
+                        ProductAnnotation.objects.filter(
+                            source_type='human',
+                            source_id=annotator.id,
+                            attribute__is_active=True,
+                            batch_item_id__in=completed_batch_item_ids,
+                        ).values('product_id', 'attribute_id', 'value')
+                    )
+                    annotation_keys = {
+                        (ann['product_id'], ann['attribute_id']) for ann in human_annotations
+                    }
+                    product_ids = {key[0] for key in annotation_keys}
+                    attribute_ids = {key[1] for key in annotation_keys}
+                    product_subclass_map = {
+                        product.id: product.subclass
+                        for product in BaseProduct.objects.filter(
+                            id__in=product_ids
+                        ).select_related('subclass')
+                    }
+                    subclass_attribute_ids_cache = {}
+                    ai_annotations = ProductAnnotation.objects.filter(
+                        source_type='ai',
+                        attribute__is_active=True,
+                        product_id__in=product_ids,
+                        attribute_id__in=attribute_ids,
+                    ).values('product_id', 'attribute_id', 'value')
+
+                    ai_values_map = {}
+                    for ann in ai_annotations:
+                        value = ann['value']
+                        if value is None:
+                            continue
+                        key = (ann['product_id'], ann['attribute_id'])
+                        ai_values_map.setdefault(key, []).append(str(value).strip())
+
+                    for ann in human_annotations:
+                        key = (ann['product_id'], ann['attribute_id'])
+                        product_subclass = product_subclass_map.get(ann['product_id'])
+                        if not product_subclass:
+                            continue
+                        subclass_id = product_subclass.id
+                        if subclass_id not in subclass_attribute_ids_cache:
+                            subclass_attribute_ids_cache[subclass_id] = set(
+                                get_active_subclass_attribute_ids(product_subclass)
+                            )
+                        if ann['attribute_id'] not in subclass_attribute_ids_cache[subclass_id]:
+                            continue
+                        ai_values = ai_values_map.get(key)
+                        if not ai_values:
+                            continue
+                        consensus, _ = Counter(ai_values).most_common(1)[0]
+                        consensus_value = str(consensus).strip()
+                        if consensus_value.lower() == 'unknown':
+                            continue
+                        human_value = '' if ann['value'] is None else str(ann['value']).strip()
+                        compared += 1
+                        if human_value.lower() == consensus_value.lower():
+                            matches += 1
+                approved = matches
+                changed = max(compared - matches, 0)
+                approved_rate = (approved / compared * 100) if compared else 0
+                changed_rate = (changed / compared * 100) if compared else 0
                 
                 recent_activity = []
                 for annotation in recent_annotations:
@@ -3452,7 +3548,15 @@ class DashboardViewSet(viewsets.ViewSet):
                         assignments.order_by('-updated_at')[:5], 
                         many=True
                     ).data,
-                    'recent_products': ProductSerializer(recent_products, many=True).data
+                    'recent_products': ProductSerializer(recent_products, many=True).data,
+                    'daily_productivity': daily_productivity,
+                    'ai_agreement': {
+                        'approved': approved,
+                        'changed': changed,
+                        'approved_rate': approved_rate,
+                        'changed_rate': changed_rate,
+                        'compared': compared,
+                    },
                 }
                 
                 return Response(payload)
